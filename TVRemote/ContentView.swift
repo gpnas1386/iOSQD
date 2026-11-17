@@ -114,6 +114,21 @@ struct ContentView: View {
                 }
                 .font(.caption)
             }
+
+            Divider().padding(.vertical, 2)
+
+            Toggle(isOn: Binding(
+                get: { controller.autoReconnectEnabled },
+                set: { controller.setAutoReconnect($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("断线自动重连")
+                        .font(.caption)
+                    Text("电视关机再开、或 App 切回前台时自动重连，无需再去电视开多屏互动")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

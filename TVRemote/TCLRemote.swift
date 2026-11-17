@@ -46,6 +46,11 @@ final class TCLRemote {
     private var useAES = false
     private let queue = DispatchQueue(label: "tvremote.tcl")
 
+    /// 连接意外断开时回调（主动 disconnect 不触发）
+    var onDisconnect: (() -> Void)?
+    private var hasConnected = false
+    private var closedIntentionally = false
+
     init(clientName: String = "TV Remote") {
         self.clientName = clientName
         self.clientID = String(UUID().uuidString.prefix(16))
@@ -179,6 +184,8 @@ final class TCLRemote {
         connection?.cancel()
         recvBuffer.removeAll()
         useAES = false
+        hasConnected = false
+        closedIntentionally = false
 
         let conn = NWConnection(
             host: NWEndpoint.Host(host),
@@ -205,6 +212,7 @@ final class TCLRemote {
                         if fields.count > 6, fields[6] == "1" {
                             self.useAES = true
                         }
+                        self.hasConnected = true
                         self.beginReceiveLoop()
                         completion(true)
                     } else {
@@ -213,10 +221,15 @@ final class TCLRemote {
                 }
             case .failed, .cancelled:
                 lock.lock()
-                defer { lock.unlock() }
-                guard !finished else { return }
+                let wasFinished = finished
                 finished = true
-                completion(false)
+                lock.unlock()
+                if !wasFinished {
+                    completion(false)
+                } else if self.hasConnected {
+                    // 已连接后断开（电视关机 / 断网 / 系统挂起）
+                    self.notifyDisconnect()
+                }
             default:
                 break
             }
@@ -231,8 +244,18 @@ final class TCLRemote {
     }
 
     func disconnect() {
+        closedIntentionally = true
         connection?.cancel()
         connection = nil
+    }
+
+    /// 通知上层：连接意外断开（电视关机 / 断网 / App 被挂起）
+    private func notifyDisconnect() {
+        guard hasConnected, !closedIntentionally else { return }
+        hasConnected = false
+        DispatchQueue.main.async { [weak self] in
+            self?.onDisconnect?()
+        }
     }
 
     // MARK: - 内部
@@ -259,8 +282,13 @@ final class TCLRemote {
     }
 
     private func beginReceiveLoop() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] _, _, _, _ in
-            self?.beginReceiveLoop()
+        connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] _, _, isComplete, error in
+            guard let self = self else { return }
+            if error != nil || isComplete {
+                self.notifyDisconnect()
+                return
+            }
+            self.beginReceiveLoop()
         }
     }
 

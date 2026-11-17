@@ -62,6 +62,13 @@ final class RemoteController: NSObject, ObservableObject {
     @Published var wifiAddress = ""
     /// 扫描是否进行中
     @Published var isScanning = false
+    /// 是否正在自动重连（UI 显示"重连中"）
+    @Published var autoReconnecting = false
+    /// 是否启用断线自动重连（用户可关闭）
+    @Published var autoReconnectEnabled = true
+
+    private var reconnectTask: Task<Void, Never>?
+    private var foregroundObserver: NSObjectProtocol?
 
     /// 当前是否使用 TCL 协议（TCL 协议不支持文本输入/应用启动/媒体键等）
     var isTCL: Bool { currentProtocol == .tcl }
@@ -97,10 +104,39 @@ final class RemoteController: NSObject, ObservableObject {
         super.init()
         identity = IdentityStore.loadIdentity()
         scanStatus = ["SSDP": "待扫描", "TCL": "待扫描", "Bonjour": "待扫描"]
-        // 启动即扫描；不再自动连接上次设备（避免卡在一个早已失效的 IP 上）
-        startBrowsing()
+
+        // 从后台回到前台时，若还没连上就自动重连（TCP 长连接会被系统挂断）
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self else { return }
+                guard self.autoReconnectEnabled,
+                      self.state != .connected,
+                      !self.currentHost.isEmpty else { return }
+                self.appendLog("回到前台，自动重连 \(self.currentHost)")
+                self.startAutoReconnect(host: self.currentHost)
+            }
+        }
+
         if let saved = DeviceStore.load() {
-            appendLog("上次连接过：\(saved.name) @ \(saved.host)")
+            currentHost = saved.host
+            currentDeviceName = saved.name
+            appendLog("上次设备：\(saved.name) @ \(saved.host)（\(saved.kind)）")
+            if saved.kind == "tcl" {
+                // 关键优化：TCL 设备直接重连，不再依赖「多屏互动」触发的广播发现
+                currentProtocol = .tcl
+                appendLog("直接重连上次的 TCL 设备，跳过扫描")
+                startAutoReconnect(host: saved.host)
+            } else {
+                connectRemote(host: saved.host, pairIfNeeded: true)
+            }
+            // 后台仍扫描一次，用于 IP 变化（DHCP 重新分配）时兜底
+            startBrowsing()
+        } else {
+            startBrowsing()
         }
     }
 
@@ -160,6 +196,15 @@ final class RemoteController: NSObject, ObservableObject {
                 self.scanStatus["TCL"] = "\(tclDevices.count) 台"
                 for d in tclDevices {
                     self.mergeDevice(name: d.name, host: d.host, kind: .tcl)
+                }
+                // 电视重启后 IP 可能变化：重连中若发现新地址，切换过去
+                if self.autoReconnecting,
+                   let first = tclDevices.first,
+                   first.host != self.currentHost {
+                    self.appendLog("发现电视新地址 \(first.host)，切换重连目标")
+                    self.currentHost = first.host
+                    self.currentDeviceName = first.name
+                    self.startAutoReconnect(host: first.host)
                 }
             }
         })
@@ -329,8 +374,12 @@ final class RemoteController: NSObject, ObservableObject {
     }
 
     func disconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        autoReconnecting = false
         connection?.cancel()
         connection = nil
+        tclRemote?.onDisconnect = nil
         tclRemote?.disconnect()
         tclRemote = nil
         state = .disconnected
@@ -365,25 +414,82 @@ final class RemoteController: NSObject, ObservableObject {
 
     private func connectTCL(host: String) {
         currentProtocol = .tcl
-        state = .connecting
-        message = "正在连接 \(host)（TCL）…"
-        appendLog("TCL → 连接 \(host):6553")
-        let tcl = TCLRemote()
-        tclRemote = tcl
-        tcl.connect(host: host) { [weak self] ok in
-            Task { @MainActor in
-                guard let self = self else { return }
-                if ok {
-                    self.state = .connected
-                    self.message = "已连接，可以遥控了"
-                    self.appendLog("TCL ✓ 握手成功")
-                    self.saveDevice()
-                } else {
-                    self.state = .failed("TCL 连接失败")
-                    self.message = "TCL 连接失败：电视可能未开启投屏/遥控服务"
-                    self.appendLog("TCL ✗ 连接或握手失败（6553）")
+        currentHost = host
+        startAutoReconnect(host: host)
+    }
+
+    /// 自动重连循环：失败每 3 秒重试，最多 40 次（约 2 分钟）
+    /// 每 3 次失败回退做一次扫描，以防电视 DHCP 换了 IP。
+    func startAutoReconnect(host: String) {
+        reconnectTask?.cancel()
+        guard autoReconnectEnabled else { return }
+        reconnectTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            var attempt = 0
+            while !Task.isCancelled {
+                attempt += 1
+                self.autoReconnecting = true
+                self.state = .connecting
+                self.message = attempt == 1 ? "正在连接 \(host) …" : "正在重连（第 \(attempt) 次）…"
+
+                let tcl = TCLRemote()
+                let ok: Bool = await withCheckedContinuation { cont in
+                    tcl.connect(host: host) { result in
+                        cont.resume(returning: result)
+                    }
                 }
+                if Task.isCancelled { return }
+
+                if ok {
+                    self.tclRemote = tcl
+                    self.currentProtocol = .tcl
+                    self.state = .connected
+                    self.autoReconnecting = false
+                    self.message = "已连接，可以遥控了"
+                    self.appendLog("TCL ✓ 连接成功（第 \(attempt) 次）")
+                    self.saveDevice()
+                    // 连接断开时自动进入重连
+                    tcl.onDisconnect = { [weak self] in
+                        Task { @MainActor in
+                            guard let self = self else { return }
+                            self.appendLog("TCL ✗ 连接已断开")
+                            self.state = .disconnected
+                            self.message = "连接断开，正在自动重连…"
+                            if self.autoReconnectEnabled {
+                                self.startAutoReconnect(host: self.currentHost)
+                            }
+                        }
+                    }
+                    return
+                }
+
+                self.appendLog("TCL ✗ 第 \(attempt) 次连接失败")
+                if attempt % 3 == 0 {
+                    self.appendLog("连续失败，回退扫描一次（电视 IP 可能已变化）")
+                    self.startBrowsing()
+                }
+                if attempt >= 40 {
+                    self.state = .failed("多次重连失败")
+                    self.autoReconnecting = false
+                    self.message = "无法连接电视，请确认电视已开机"
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
+        }
+    }
+
+    func setAutoReconnect(_ enabled: Bool) {
+        autoReconnectEnabled = enabled
+        if enabled {
+            if state != .connected && !currentHost.isEmpty {
+                startAutoReconnect(host: currentHost)
+            }
+        } else {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            autoReconnecting = false
+            appendLog("已关闭自动重连")
         }
     }
 
@@ -546,7 +652,8 @@ final class RemoteController: NSObject, ObservableObject {
 
     private func saveDevice() {
         guard !currentHost.isEmpty else { return }
-        DeviceStore.save(host: currentHost, name: currentDeviceName)
+        let kind = currentProtocol == .tcl ? "tcl" : "google"
+        DeviceStore.save(host: currentHost, name: currentDeviceName, kind: kind)
     }
 }
 
@@ -591,10 +698,16 @@ private enum DeviceStore {
     private static let service = "com.tvremote.device"
     private static let account = "last-device"
 
-    static func save(host: String, name: String) {
-        guard let payload = try? JSONSerialization.data(withJSONObject: ["host": host, "name": name]) else {
-            return
-        }
+    struct Saved {
+        let host: String
+        let name: String
+        let kind: String   // "tcl" / "google"
+    }
+
+    static func save(host: String, name: String, kind: String) {
+        guard let payload = try? JSONSerialization.data(
+            withJSONObject: ["host": host, "name": name, "kind": kind]
+        ) else { return }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -608,7 +721,7 @@ private enum DeviceStore {
         }
     }
 
-    static func load() -> (host: String, name: String)? {
+    static func load() -> Saved? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -624,7 +737,7 @@ private enum DeviceStore {
               let name = object["name"] else {
             return nil
         }
-        return (host, name)
+        return Saved(host: host, name: name, kind: object["kind"] ?? "google")
     }
 
     static func clear() {
