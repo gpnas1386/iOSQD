@@ -210,28 +210,36 @@ struct KeyButton: View {
 
 struct RepeatKeyButton: View {
     let icon: String
+    var label: String? = nil
     let keyCode: Int
     let action: (Int) -> Void
     @State private var timer: Timer?
 
-    init(icon: String, keyCode: Int, action: @escaping (Int) -> Void) {
+    init(icon: String, label: String? = nil, keyCode: Int, action: @escaping (Int) -> Void) {
         self.icon = icon
+        self.label = label
         self.keyCode = keyCode
         self.action = action
     }
 
     var body: some View {
-        Image(systemName: icon)
-            .font(.system(size: 20))
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(.secondarySystemBackground))
-            .cornerRadius(14)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in start() }
-                    .onEnded { _ in stop() }
-            )
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 20))
+            if let label = label {
+                Text(label)
+                    .font(.caption2)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(14)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in start() }
+                .onEnded { _ in stop() }
+        )
     }
 
     private func start() {
