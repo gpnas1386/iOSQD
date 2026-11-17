@@ -235,6 +235,19 @@ final class TCLRemote {
             }
         }
         conn.start(queue: queue)
+
+        // 连接超时保护：电视关机时 TCP 可能长时间处于 waiting 状态，
+        // 没有这一步会让上层重连循环卡死。
+        queue.asyncAfter(deadline: .now() + 4.0) {
+            lock.lock()
+            let already = finished
+            if !already { finished = true }
+            lock.unlock()
+            if !already {
+                conn.cancel()
+                completion(false)
+            }
+        }
     }
 
     // MARK: - 发送按键
