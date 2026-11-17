@@ -89,7 +89,7 @@ final class TCLRemote {
         let msg = "1:\(ts):\(myName):PHONE:1:\(myName):\(uuid):0:0\0"
         guard let pkt = msg.data(using: .utf8) else { return [] }
 
-        func broadcast(to ip: String) {
+        func sendBroadcast(to ip: String) {
             var dest = sockaddr_in()
             dest.sin_family = sa_family_t(AF_INET)
             dest.sin_port = UInt16(6537).bigEndian
@@ -109,8 +109,8 @@ final class TCLRemote {
 
         while Date() < deadline {
             if !sent {
-                broadcast(to: "255.255.255.255")
-                broadcast(to: "192.168.255.255")
+                sendBroadcast(to: "255.255.255.255")
+                sendBroadcast(to: "192.168.255.255")
                 sent = true
             }
 
