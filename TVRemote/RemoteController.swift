@@ -27,13 +27,24 @@ final class RemoteController: NSObject, ObservableObject {
     enum ProtocolKind {
         case googleTV
         case tcl
+        case unknown
     }
 
     struct Device: Identifiable, Hashable {
         let name: String
         let host: String
         let kind: ProtocolKind
+        var ports: [UInt16] = []
         var id: String { host }
+
+        var protocolLabel: String {
+            switch kind {
+            case .tcl: return "TCL"
+            case .googleTV: return "Google TV"
+            case .unknown:
+                return ports.isEmpty ? "未识别" : PortScanner.inferProtocol(ports)
+            }
+        }
     }
 
     @Published var devices: [Device] = []
@@ -42,6 +53,15 @@ final class RemoteController: NSObject, ObservableObject {
     @Published var currentApp: String?
     @Published var showPairingSheet = false
     @Published var message = "正在搜索内网电视…"
+
+    /// 诊断日志（首屏可见，用于定位「为什么扫不到」）
+    @Published var logs: [String] = []
+    /// 各路发现渠道的状态摘要
+    @Published var scanStatus: [String: String] = [:]
+    /// 本机 Wi-Fi 地址
+    @Published var wifiAddress = ""
+    /// 扫描是否进行中
+    @Published var isScanning = false
 
     /// 当前是否使用 TCL 协议（TCL 协议不支持文本输入/应用启动/媒体键等）
     var isTCL: Bool { currentProtocol == .tcl }
@@ -76,12 +96,11 @@ final class RemoteController: NSObject, ObservableObject {
     override init() {
         super.init()
         identity = IdentityStore.loadIdentity()
+        scanStatus = ["SSDP": "待扫描", "TCL": "待扫描", "Bonjour": "待扫描"]
+        // 启动即扫描；不再自动连接上次设备（避免卡在一个早已失效的 IP 上）
+        startBrowsing()
         if let saved = DeviceStore.load() {
-            currentHost = saved.host
-            currentDeviceName = saved.name
-            connectRemote(host: saved.host)
-        } else {
-            startBrowsing()
+            appendLog("上次连接过：\(saved.name) @ \(saved.host)")
         }
     }
 
@@ -89,30 +108,132 @@ final class RemoteController: NSObject, ObservableObject {
 
     func refresh() {
         devices.removeAll()
+        scanStatus = ["SSDP": "进行中", "TCL": "进行中", "Bonjour": "进行中"]
         state = .searching
         message = "正在搜索内网电视…"
+        appendLog("──────── 开始新一轮扫描 ────────")
         startBrowsing()
     }
 
     func startBrowsing() {
         for b in browsers { b.stop() }
         browsers.removeAll()
-        // 同时浏览 v2 与 v1 协议服务，覆盖更多电视型号
+        resolvingServices.removeAll()
+        isScanning = true
+
+        // 0) 先报告网络环境，这是排查的第一手信息
+        if let wifi = NetworkInfo.wifiInterface() {
+            wifiAddress = wifi.address
+            appendLog("本机 Wi-Fi \(wifi.name)：\(wifi.address) / \(wifi.netmask)"
+                      + (wifi.broadcast.map { " 广播 \($0)" } ?? ""))
+        } else {
+            wifiAddress = ""
+            appendLog("⚠️ 未检测到 Wi-Fi 接口（en0）")
+        }
+        if NetworkInfo.isCellularOnly() {
+            appendLog("⚠️ 当前只有蜂窝网络，请连接与电视相同的 Wi-Fi")
+        }
+
+        // 1) SSDP（最通用，几乎所有电视都响应）
+        SSDPDiscovery.scan(timeout: 3.5, log: { [weak self] text in
+            self?.safeLog(text)
+        }, completion: { [weak self] results in
+            Task { @MainActor in
+                guard let self = self else { return }
+                self.scanStatus["SSDP"] = "\(results.count) 台"
+                for r in results {
+                    self.appendLog("SSDP ✓ \(r.name) @ \(r.host)")
+                    self.mergeDevice(name: r.name, host: r.host, kind: .unknown)
+                }
+                if results.isEmpty {
+                    self.appendLog("SSDP 无响应：可能路由器开了「AP 隔离 / 访客网络」，或电视未联网")
+                }
+            }
+        })
+
+        // 2) TCL 专有协议（UDP 6537）
+        TCLRemote.discover(timeout: 4, log: { [weak self] text in
+            self?.safeLog(text)
+        }, completion: { [weak self] tclDevices in
+            Task { @MainActor in
+                guard let self = self else { return }
+                self.scanStatus["TCL"] = "\(tclDevices.count) 台"
+                for d in tclDevices {
+                    self.mergeDevice(name: d.name, host: d.host, kind: .tcl)
+                }
+            }
+        })
+
+        // 3) Bonjour（Google TV / Android TV）
         for type in ["_androidtvremote2._tcp.", "_androidtvremote._tcp."] {
             let b = NetServiceBrowser()
             b.delegate = self
             b.searchForServices(ofType: type, inDomain: "local.")
             browsers.append(b)
         }
-        // TCL / 雷鸟电视：UDP 6537 广播发现
-        TCLRemote.discover { [weak self] tclDevices in
+        appendLog("Bonjour → 浏览 _androidtvremote2 / _androidtvremote")
+
+        // 无论哪路先结束，6 秒后统一收尾
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
             guard let self = self else { return }
-            for d in tclDevices {
-                let device = Device(name: d.name, host: d.host, kind: .tcl)
-                if !self.devices.contains(where: { $0.host == d.host }) {
-                    self.devices.append(device)
-                }
+            self.isScanning = false
+            if self.devices.isEmpty {
+                self.message = "未发现设备，请展开诊断日志查看详情"
+                self.appendLog("扫描结束：未发现任何设备")
+            } else {
+                self.message = "发现 \(self.devices.count) 台设备，点「设备」选择"
+                self.appendLog("扫描结束：共 \(self.devices.count) 台设备")
             }
+        }
+    }
+
+    /// 合并同一 IP 的设备信息（协议优先级：tcl / googleTV > unknown）
+    private func mergeDevice(name: String, host: String, kind: ProtocolKind) {
+        if let idx = devices.firstIndex(where: { $0.host == host }) {
+            let old = devices[idx]
+            if old.kind == .unknown && kind != .unknown {
+                devices[idx] = Device(name: name.isEmpty ? old.name : name,
+                                      host: host, kind: kind, ports: old.ports)
+            }
+            return
+        }
+        devices.append(Device(name: name.isEmpty ? host : name, host: host,
+                              kind: kind, ports: []))
+        probePorts(for: host)
+    }
+
+    /// 对发现的 IP 做端口探测，判断它支持哪种遥控协议
+    private func probePorts(for host: String) {
+        PortScanner.probe(host: host) { [weak self] ports in
+            Task { @MainActor in
+                guard let self = self else { return }
+                guard let idx = self.devices.firstIndex(where: { $0.host == host }) else { return }
+                let old = self.devices[idx]
+                self.devices[idx] = Device(name: old.name, host: host, kind: old.kind, ports: ports)
+                let desc = PortScanner.describe(ports)
+                self.appendLog("端口探测 \(host)：\(desc.isEmpty ? "无开放端口" : desc)")
+            }
+        }
+    }
+
+    // MARK: - 日志
+
+    func appendLog(_ text: String) {
+        let now = Date()
+        let comps = Calendar.current.dateComponents([.hour, .minute, .second], from: now)
+        let stamp = String(format: "%02d:%02d:%02d",
+                           comps.hour ?? 0, comps.minute ?? 0, comps.second ?? 0)
+        logs.append("[\(stamp)] \(text)")
+        if logs.count > 200 {
+            logs.removeFirst(logs.count - 200)
+        }
+    }
+
+    /// 供后台线程安全写日志
+    nonisolated private func safeLog(_ text: String) {
+        Task { @MainActor in
+            self.appendLog(text)
         }
     }
 
@@ -121,30 +242,44 @@ final class RemoteController: NSObject, ObservableObject {
     func select(_ device: Device) {
         currentDeviceName = device.name
         currentHost = device.host
-        if device.kind == .tcl {
+        switch device.kind {
+        case .tcl:
             connectTCL(host: device.host)
-        } else {
+        case .googleTV:
             connectRemote(host: device.host, pairIfNeeded: true)
+        case .unknown:
+            connectManually(device.host)
         }
     }
 
-    func connectManually(_ host: String) {
-        let clean = host.trimmingCharacters(in: .whitespacesAndNewlines)
+    func connectManually(_ raw: String) {
+        let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         currentHost = clean
         currentDeviceName = clean
         state = .connecting
-        message = "正在连接 \(clean) …"
-        // 先尝试 TCL 协议，失败再回退到 Google TV
-        attemptTCL(host: clean) { [weak self] ok in
-            guard let self = self else { return }
-            if ok {
-                self.currentProtocol = .tcl
-                self.state = .connected
-                self.message = "已连接（TCL），可以遥控了"
-                self.saveDevice()
-            } else {
-                self.connectRemote(host: clean, pairIfNeeded: true)
+        message = "正在探测 \(clean) …"
+        appendLog("手动连接 \(clean)：开始端口探测")
+
+        PortScanner.probe(host: clean) { [weak self] ports in
+            Task { @MainActor in
+                guard let self = self else { return }
+                let desc = PortScanner.describe(ports)
+                self.appendLog("探测结果：\(desc.isEmpty ? "全部端口关闭/被防火墙拦截" : desc)")
+
+                if ports.contains(6553) {
+                    self.appendLog("→ 命中 6553，使用 TCL 协议")
+                    self.connectTCL(host: clean)
+                } else if ports.contains(6466) {
+                    self.appendLog("→ 命中 6466，使用 Google TV 协议")
+                    self.connectRemote(host: clean, pairIfNeeded: true)
+                } else if ports.contains(8060) {
+                    self.state = .failed("检测到 8060 端口：这是 Roku 系统，暂不支持")
+                    self.message = "这台电视是 Roku 系统，需要另一套协议"
+                } else {
+                    self.appendLog("→ 无已知遥控端口，回退尝试 TCL 协议")
+                    self.connectTCL(host: clean)
+                }
             }
         }
     }
@@ -221,8 +356,10 @@ final class RemoteController: NSObject, ObservableObject {
 
     private func connectRemote(host: String, pairIfNeeded: Bool = false) {
         pairIfRejected = pairIfNeeded
+        currentProtocol = .googleTV
         state = .connecting
         message = "正在连接 \(host) …"
+        appendLog("Google TV → 连接 \(host):6466 (TLS)")
         open(host: host, port: 6466, mode: .remote)
     }
 
@@ -230,6 +367,7 @@ final class RemoteController: NSObject, ObservableObject {
         currentProtocol = .tcl
         state = .connecting
         message = "正在连接 \(host)（TCL）…"
+        appendLog("TCL → 连接 \(host):6553")
         let tcl = TCLRemote()
         tclRemote = tcl
         tcl.connect(host: host) { [weak self] ok in
@@ -238,20 +376,13 @@ final class RemoteController: NSObject, ObservableObject {
                 if ok {
                     self.state = .connected
                     self.message = "已连接，可以遥控了"
+                    self.appendLog("TCL ✓ 握手成功")
                     self.saveDevice()
                 } else {
-                    self.state = .failed("TCL 连接失败：请确认电视已开启投屏/遥控服务，且与手机同一网络")
+                    self.state = .failed("TCL 连接失败")
+                    self.message = "TCL 连接失败：电视可能未开启投屏/遥控服务"
+                    self.appendLog("TCL ✗ 连接或握手失败（6553）")
                 }
-            }
-        }
-    }
-
-    private func attemptTCL(host: String, completion: @escaping (Bool) -> Void) {
-        let tcl = TCLRemote()
-        tcl.connect(host: host) { [weak self] ok in
-            Task { @MainActor in
-                if ok { self?.tclRemote = tcl }
-                completion(ok)
             }
         }
     }

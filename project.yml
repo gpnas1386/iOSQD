@@ -22,16 +22,19 @@ targets:
       path: TVRemote/Info.plist
       properties:
         CFBundleDisplayName: 电视遥控
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.2.0"
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         # 本地网络权限（iOS 14+ 必需）
-        NSLocalNetworkUsageDescription: 需要访问本地网络，以发现并遥控同一 Wi-Fi 下的 Android TV / Google TV。
+        NSLocalNetworkUsageDescription: 需要访问本地网络，以发现并遥控同一 Wi-Fi 下的电视。
         NSBonjourServices:
           - _androidtvremote2._tcp
           - _androidtvremote._tcp
+        # SSDP 需要以 HTTP 拉取电视的设备描述（http://192.168.x.x/...）
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.tvremote.app

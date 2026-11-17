@@ -53,34 +53,44 @@ final class TCLRemote {
 
     // MARK: - 设备发现
 
-    static func discover(timeout: TimeInterval = 5, completion: @escaping ([Device]) -> Void) {
-        DispatchQueue.global().async {
-            let result = discoverSync(timeout: timeout)
+    static func discover(timeout: TimeInterval = 4,
+                         log: @escaping (String) -> Void,
+                         completion: @escaping ([Device]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = discoverSync(timeout: timeout, log: log)
             DispatchQueue.main.async { completion(result) }
         }
     }
 
-    private static func discoverSync(timeout: TimeInterval) -> [Device] {
+    private static func discoverSync(timeout: TimeInterval, log: @escaping (String) -> Void) -> [Device] {
         var found: [String: Device] = [:]
 
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
-        guard fd >= 0 else { return [] }
+        guard fd >= 0 else {
+            log("TCL ✗ 创建 socket 失败 errno=\(errno)")
+            return []
+        }
         defer { close(fd) }
 
         var broadcast: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &broadcast, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &broadcast, socklen_t(MemoryLayout<Int32>.size))
 
+        // 绑定到临时端口即可：电视的响应会回到数据包源端口
         var bindAddr = sockaddr_in()
         bindAddr.sin_family = sa_family_t(AF_INET)
-        bindAddr.sin_port = UInt16(6537).bigEndian
+        bindAddr.sin_port = 0
         bindAddr.sin_addr.s_addr = INADDR_ANY
-        _ = withUnsafePointer(to: &bindAddr) {
+        let bindResult = withUnsafePointer(to: &bindAddr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
+        if bindResult != 0 {
+            log("TCL ✗ bind 失败 errno=\(errno)")
+        }
 
-        var tv = timeval(tv_sec: 0, tv_usec: 400_000)
+        var tv = timeval(tv_sec: 0, tv_usec: 250_000)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         let ts = Int64(Date().timeIntervalSince1970 * 1000)
@@ -89,29 +99,40 @@ final class TCLRemote {
         let msg = "1:\(ts):\(myName):PHONE:1:\(myName):\(uuid):0:0\0"
         guard let pkt = msg.data(using: .utf8) else { return [] }
 
+        // 正确计算各网段广播地址，取代硬编码的 192.168.255.255
+        let targets = NetworkInfo.broadcastTargets()
+        log("TCL → 广播到 \(targets.joined(separator: ", ")) 端口 6537")
+
         func sendBroadcast(to ip: String) {
             var dest = sockaddr_in()
             dest.sin_family = sa_family_t(AF_INET)
             dest.sin_port = UInt16(6537).bigEndian
             dest.sin_addr.s_addr = inet_addr(ip)
-            _ = pkt.withUnsafeBytes { buf in
-                withUnsafePointer(to: &dest) {
-                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
-                        sendto(fd, buf.baseAddress, buf.count, 0, sp, socklen_t(MemoryLayout<sockaddr_in>.size))
+            guard dest.sin_addr.s_addr != INADDR_NONE else { return }
+            let sent = pkt.withUnsafeBytes { buf -> Int in
+                withUnsafePointer(to: &dest) { p in
+                    p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                        sendto(fd, buf.baseAddress, buf.count, 0, sp,
+                               socklen_t(MemoryLayout<sockaddr_in>.size))
                     }
                 }
+            }
+            if sent < 0 {
+                log("TCL ✗ 发送到 \(ip) 失败 errno=\(errno)")
             }
         }
 
         let deadline = Date().addingTimeInterval(timeout)
-        var sent = false
+        var lastSend = Date.distantPast
         var recv = [UInt8](repeating: 0, count: 4096)
+        var rounds = 0
 
         while Date() < deadline {
-            if !sent {
-                sendBroadcast(to: "255.255.255.255")
-                sendBroadcast(to: "192.168.255.255")
-                sent = true
+            // 每秒重发一轮，提高成功率（UDP 可能丢包）
+            if Date().timeIntervalSince(lastSend) > 1.0 {
+                for t in targets { sendBroadcast(to: t) }
+                lastSend = Date()
+                rounds += 1
             }
 
             var from = sockaddr_in()
@@ -126,14 +147,21 @@ final class TCLRemote {
             let data = Data(recv[0..<n])
             guard let text = String(data: data, encoding: .utf8) else { continue }
             let fields = text.components(separatedBy: ":")
-            guard fields.count >= 4, fields[3] == "TV" else { continue }
+            guard fields.count >= 4 else { continue }
+            // 只接受角色为 TV 的响应
+            guard fields[3] == "TV" else { continue }
 
             let ip = ipString(from: from) ?? ""
             guard !ip.isEmpty else { continue }
             let name = fields[2]
             if found[ip] == nil {
                 found[ip] = Device(name: name, host: ip)
+                log("TCL ← 发现 \(name) @ \(ip)")
             }
+        }
+
+        if found.isEmpty {
+            log("TCL ← 未收到 6537 响应（共广播 \(rounds) 轮）")
         }
         return Array(found.values)
     }

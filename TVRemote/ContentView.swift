@@ -10,6 +10,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var controller: RemoteController
     @State private var showDevices = false
+    @State private var manualIP = ""
 
     var body: some View {
         NavigationStack {
@@ -31,6 +32,7 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    .disabled(controller.isScanning)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
@@ -52,28 +54,145 @@ struct ContentView: View {
     }
 
     private var placeholderView: some View {
-        VStack(spacing: 16) {
-            Spacer()
+        ScrollView {
+            VStack(spacing: 16) {
+                headerBlock
+                networkCard
+                manualCard
+                actionRow
+                logCard
+                Spacer(minLength: 12)
+            }
+            .padding()
+        }
+    }
+
+    private var headerBlock: some View {
+        VStack(spacing: 10) {
             Image(systemName: statusIcon)
-                .font(.system(size: 56))
+                .font(.system(size: 44))
                 .foregroundColor(statusColor)
             Text(controller.message)
                 .font(.headline)
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)
-            if controller.state == .disconnected {
-                Button("选择电视") {
-                    showDevices = true
+            if controller.isScanning {
+                ProgressView()
+                    .scaleEffect(0.8)
+            }
+            Text("v\(appVersion)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
+    }
+
+    private var appVersion: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
+    }
+
+    private var networkCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("网络状态", systemImage: "wifi")
+                .font(.subheadline.bold())
+
+            HStack {
+                Text("本机 Wi-Fi IP")
+                Spacer()
+                Text(controller.wifiAddress.isEmpty ? "未连接" : controller.wifiAddress)
+                    .foregroundColor(controller.wifiAddress.isEmpty ? .red : .secondary)
+            }
+            .font(.caption)
+
+            ForEach(["SSDP", "TCL", "Bonjour"], id: \.self) { key in
+                HStack {
+                    Text(key)
+                    Spacer()
+                    Text(controller.scanStatus[key] ?? "—")
+                        .foregroundColor(.secondary)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(12)
+    }
+
+    private var manualCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("手动连接")
+                .font(.subheadline.bold())
+            Text("在电视「设置 → 网络 / 关于」里查看 IP，直接输入即可")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            HStack(spacing: 8) {
+                TextField("如 192.168.1.100", text: $manualIP)
+                    .keyboardType(.numbersAndPunctuation)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(8)
+                    .background(Color(.tertiarySystemGroupedBackground))
+                    .cornerRadius(8)
+                Button("连接") {
+                    let ip = manualIP
+                    manualIP = ""
+                    controller.connectManually(ip)
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(manualIP.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            Button("扫描内网电视") {
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(12)
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 10) {
+            Button {
                 controller.refresh()
+            } label: {
+                Label("重新扫描", systemImage: "arrow.clockwise")
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            Spacer()
+            .disabled(controller.isScanning)
+
+            Button {
+                showDevices = true
+            } label: {
+                Label("设备 \(controller.devices.count)", systemImage: "tv")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
         }
-        .padding()
+    }
+
+    private var logCard: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 3) {
+                if controller.logs.isEmpty {
+                    Text("暂无日志").font(.caption2).foregroundColor(.secondary)
+                }
+                ForEach(Array(controller.logs.suffix(60).enumerated()), id: \.offset) { pair in
+                    Text(pair.element)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(.top, 6)
+        } label: {
+            Label("诊断日志（\(controller.logs.count)）", systemImage: "doc.text.magnifyingglass")
+                .font(.subheadline)
+        }
+        .padding(12)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(12)
     }
 
     private var statusIcon: String {
@@ -126,12 +245,17 @@ struct DeviceListView: View {
                             HStack {
                                 Image(systemName: "tv")
                                     .foregroundColor(.accentColor)
-                                VStack(alignment: .leading) {
+                                VStack(alignment: .leading, spacing: 2) {
                                     Text(device.name).foregroundColor(.primary)
                                     Text(device.host).font(.caption).foregroundColor(.secondary)
+                                    if !device.ports.isEmpty {
+                                        Text(device.ports.map { String($0) }.joined(separator: " / "))
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
                                 }
                                 Spacer()
-                                Text(device.kind == .tcl ? "TCL" : "Google TV")
+                                Text(device.protocolLabel)
                                     .font(.caption2)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
