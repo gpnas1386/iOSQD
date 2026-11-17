@@ -11,7 +11,7 @@ on:
 jobs:
   build:
     # 使用 GitHub 免费的 macOS 云端机器（无需本地 Mac）
-    runs-on: macos-14
+    runs-on: macos-latest
 
     steps:
       - name: 检出代码
