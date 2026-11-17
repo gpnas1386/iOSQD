@@ -22,8 +22,15 @@ targets:
       path: TVRemote/Info.plist
       properties:
         CFBundleDisplayName: 电视遥控
-        CFBundleShortVersionString: "1.2.0"
-        CFBundleVersion: "3"
+        CFBundleShortVersionString: "1.2.1"
+        CFBundleVersion: "4"
+        # 显式声明图标，避免 Info.plist 完全由 XcodeGen 生成时丢失图标引用
+        CFBundleIconName: AppIcon
+        CFBundleIcons:
+          CFBundlePrimaryIcon:
+            CFBundleIconFiles:
+              - AppIcon60x60
+            CFBundleIconName: AppIcon
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
