@@ -38,7 +38,7 @@ final class RemoteController: NSObject, ObservableObject {
     @Published var message = "正在搜索内网电视…"
 
     private let queue = DispatchQueue(label: "tvremote.network")
-    private let browser = NetServiceBrowser()
+    private var browsers: [NetServiceBrowser] = []
     private var resolvingServices: [NetService] = []
     private var connection: NWConnection?
     private var receiveBuffer = Data()
@@ -55,7 +55,6 @@ final class RemoteController: NSObject, ObservableObject {
 
     override init() {
         super.init()
-        browser.delegate = self
         identity = IdentityStore.loadIdentity()
         if let saved = DeviceStore.load() {
             currentHost = saved.host
@@ -76,8 +75,15 @@ final class RemoteController: NSObject, ObservableObject {
     }
 
     func startBrowsing() {
-        browser.stop()
-        browser.searchForServices(ofType: "_androidtvremote2._tcp.", inDomain: "local.")
+        for b in browsers { b.stop() }
+        browsers.removeAll()
+        // 同时浏览 v2 与 v1 协议服务，覆盖更多电视型号
+        for type in ["_androidtvremote2._tcp.", "_androidtvremote._tcp."] {
+            let b = NetServiceBrowser()
+            b.delegate = self
+            b.searchForServices(ofType: type, inDomain: "local.")
+            browsers.append(b)
+        }
     }
 
     // MARK: - 连接 / 配对

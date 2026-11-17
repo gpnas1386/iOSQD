@@ -31,10 +31,12 @@ targets:
         NSLocalNetworkUsageDescription: 需要访问本地网络，以发现并遥控同一 Wi-Fi 下的 Android TV / Google TV。
         NSBonjourServices:
           - _androidtvremote2._tcp
+          - _androidtvremote._tcp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.tvremote.app
         TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # 无签名构建，供巨魔商店(TrollStore)安装
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"

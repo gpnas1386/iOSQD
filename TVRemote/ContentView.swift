@@ -109,8 +109,14 @@ struct DeviceListView: View {
             List {
                 Section("已发现设备") {
                     if controller.devices.isEmpty {
-                        Text("暂未发现电视，点右上角刷新")
-                            .foregroundColor(.secondary)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("暂未发现电视")
+                                .foregroundColor(.secondary)
+                            Text("排查建议：\n1. 手机与电视连同一 Wi-Fi，路由器勿开「AP 隔离」\n2. 电视需开启「远程控制 / Android TV Remote」功能\n3. 检查 设置 → 隐私与安全 → 本地网络，允许本 App\n4. 也可在下方手动输入电视 IP 直连")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 4)
                     }
                     ForEach(controller.devices) { device in
                         Button {
