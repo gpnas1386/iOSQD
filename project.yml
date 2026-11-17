@@ -1,0 +1,42 @@
+# XcodeGen 工程定义
+name: TVRemote
+
+options:
+  bundleIdPrefix: com.tvremote
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+
+targets:
+  TVRemote:
+    type: application
+    platform: iOS
+    sources:
+      - TVRemote
+    info:
+      path: TVRemote/Info.plist
+      properties:
+        CFBundleDisplayName: 电视遥控
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # 本地网络权限（iOS 14+ 必需）
+        NSLocalNetworkUsageDescription: 需要访问本地网络，以发现并遥控同一 Wi-Fi 下的 Android TV / Google TV。
+        NSBonjourServices:
+          - _androidtvremote2._tcp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tvremote.app
+        TARGETED_DEVICE_FAMILY: "1"
+        # 无签名构建，供巨魔商店(TrollStore)安装
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
+        DEVELOPMENT_TEAM: ""

@@ -1,0 +1,14 @@
+# Xcode 生成物（由 xcodegen 生成，无需提交）
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+
+# 构建产物
+build/
+Payload/
+*.ipa
+*.dSYM.zip
+
+# 系统文件
+.DS_Store

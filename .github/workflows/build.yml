@@ -1,0 +1,40 @@
+name: Build TVRemote IPA
+
+# 两种触发方式：
+# 1) 推送到 main/master 分支自动构建
+# 2) 在 GitHub 网页 Actions 页手动点击 Run workflow 构建
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    # 使用 GitHub 免费的 macOS 云端机器（无需本地 Mac）
+    runs-on: macos-14
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 安装 ldid（可选，用于预签名）
+        run: brew install ldid || echo "ldid 安装失败，将跳过预签名（TrollStore 安装时自动处理）"
+
+      - name: 显示 Xcode 版本
+        run: xcodebuild -version
+
+      - name: 构建并打包 IPA
+        run: bash build.sh
+
+      - name: 确认产物存在
+        run: ls -lh TVRemote.ipa
+
+      - name: 上传 IPA 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVRemote-ipa
+          path: TVRemote.ipa
+          if-no-files-found: error
