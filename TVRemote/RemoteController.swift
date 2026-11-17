@@ -24,9 +24,15 @@ final class RemoteController: NSObject, ObservableObject {
         case failed(String)
     }
 
+    enum ProtocolKind {
+        case googleTV
+        case tcl
+    }
+
     struct Device: Identifiable, Hashable {
         let name: String
         let host: String
+        let kind: ProtocolKind
         var id: String { host }
     }
 
@@ -37,10 +43,24 @@ final class RemoteController: NSObject, ObservableObject {
     @Published var showPairingSheet = false
     @Published var message = "正在搜索内网电视…"
 
+    /// 当前是否使用 TCL 协议（TCL 协议不支持文本输入/应用启动/媒体键等）
+    var isTCL: Bool { currentProtocol == .tcl }
+
     private let queue = DispatchQueue(label: "tvremote.network")
     private var browsers: [NetServiceBrowser] = []
     private var resolvingServices: [NetService] = []
     private var connection: NWConnection?
+    private var tclRemote: TCLRemote?
+    private var currentProtocol: ProtocolKind = .googleTV
+
+    // Google TV 按键码 -> TCL 按键码映射
+    private static let googleToTCL: [Int: TCLRemote.Key] = [
+        19: .up, 20: .down, 21: .left, 22: .right, 23: .ok,
+        4: .back, 3: .home, 82: .menu,
+        24: .volUp, 25: .volDown, 164: .mute,
+        166: .chUp, 167: .chDown,
+        26: .power
+    ]
     private var receiveBuffer = Data()
     private var mode: Mode = .remote
     private var identity: SecIdentity?
@@ -84,6 +104,16 @@ final class RemoteController: NSObject, ObservableObject {
             b.searchForServices(ofType: type, inDomain: "local.")
             browsers.append(b)
         }
+        // TCL / 雷鸟电视：UDP 6537 广播发现
+        TCLRemote.discover { [weak self] tclDevices in
+            guard let self = self else { return }
+            for d in tclDevices {
+                let device = Device(name: d.name, host: d.host, kind: .tcl)
+                if !self.devices.contains(where: { $0.host == d.host }) {
+                    self.devices.append(device)
+                }
+            }
+        }
     }
 
     // MARK: - 连接 / 配对
@@ -91,7 +121,11 @@ final class RemoteController: NSObject, ObservableObject {
     func select(_ device: Device) {
         currentDeviceName = device.name
         currentHost = device.host
-        connectRemote(host: device.host, pairIfNeeded: true)
+        if device.kind == .tcl {
+            connectTCL(host: device.host)
+        } else {
+            connectRemote(host: device.host, pairIfNeeded: true)
+        }
     }
 
     func connectManually(_ host: String) {
@@ -99,7 +133,20 @@ final class RemoteController: NSObject, ObservableObject {
         guard !clean.isEmpty else { return }
         currentHost = clean
         currentDeviceName = clean
-        connectRemote(host: clean, pairIfNeeded: true)
+        state = .connecting
+        message = "正在连接 \(clean) …"
+        // 先尝试 TCL 协议，失败再回退到 Google TV
+        attemptTCL(host: clean) { [weak self] ok in
+            guard let self = self else { return }
+            if ok {
+                self.currentProtocol = .tcl
+                self.state = .connected
+                self.message = "已连接（TCL），可以遥控了"
+                self.saveDevice()
+            } else {
+                self.connectRemote(host: clean, pairIfNeeded: true)
+            }
+        }
     }
 
     func submitPIN(_ pin: String) {
@@ -121,12 +168,17 @@ final class RemoteController: NSObject, ObservableObject {
 
     func sendKey(_ keyCode: Int) {
         guard state == .connected else { return }
+        if currentProtocol == .tcl, let key = Self.googleToTCL[keyCode] {
+            tclRemote?.sendKey(key)
+            return
+        }
         let inject = Proto.varintField(1, keyCode) + Proto.varintField(2, 3)
         send(Proto.message(field: 10, payload: inject))
     }
 
     func sendText(_ text: String) {
         guard state == .connected, !text.isEmpty else { return }
+        guard currentProtocol != .tcl else { return } // TCL 协议暂不支持文本输入
         let last = max(text.utf16.count - 1, 0)
         let object = Proto.varintField(1, last) + Proto.varintField(2, last) + Proto.stringField(3, text)
         let edit = Proto.varintField(1, 1) + Proto.message(field: 2, payload: object)
@@ -136,6 +188,7 @@ final class RemoteController: NSObject, ObservableObject {
 
     func launch(_ appID: String) {
         guard state == .connected, !appID.isEmpty else { return }
+        guard currentProtocol != .tcl else { return } // TCL 协议暂不支持启动应用
         let link = appID.contains(":") ? appID : "market://launch?id=\(appID)"
         send(Proto.message(field: 90, payload: Proto.stringField(1, link)))
     }
@@ -143,6 +196,8 @@ final class RemoteController: NSObject, ObservableObject {
     func disconnect() {
         connection?.cancel()
         connection = nil
+        tclRemote?.disconnect()
+        tclRemote = nil
         state = .disconnected
         currentApp = nil
         message = "已断开"
@@ -169,6 +224,36 @@ final class RemoteController: NSObject, ObservableObject {
         state = .connecting
         message = "正在连接 \(host) …"
         open(host: host, port: 6466, mode: .remote)
+    }
+
+    private func connectTCL(host: String) {
+        currentProtocol = .tcl
+        state = .connecting
+        message = "正在连接 \(host)（TCL）…"
+        let tcl = TCLRemote()
+        tclRemote = tcl
+        tcl.connect(host: host) { [weak self] ok in
+            Task { @MainActor in
+                guard let self = self else { return }
+                if ok {
+                    self.state = .connected
+                    self.message = "已连接，可以遥控了"
+                    self.saveDevice()
+                } else {
+                    self.state = .failed("TCL 连接失败：请确认电视已开启投屏/遥控服务，且与手机同一网络")
+                }
+            }
+        }
+    }
+
+    private func attemptTCL(host: String, completion: @escaping (Bool) -> Void) {
+        let tcl = TCLRemote()
+        tcl.connect(host: host) { [weak self] ok in
+            Task { @MainActor in
+                if ok { self?.tclRemote = tcl }
+                completion(ok)
+            }
+        }
     }
 
     private func open(host: String, port: UInt16, mode: Mode) {
@@ -437,7 +522,7 @@ extension RemoteController: NetServiceBrowserDelegate, NetServiceDelegate {
         for address in addresses {
             if let host = Self.hostString(from: address) {
                 Task { @MainActor in
-                    let device = Device(name: sender.name, host: host)
+                    let device = Device(name: sender.name, host: host, kind: .googleTV)
                     if !self.devices.contains(where: { $0.host == host }) {
                         self.devices.append(device)
                     }

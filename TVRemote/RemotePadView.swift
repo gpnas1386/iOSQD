@@ -19,10 +19,12 @@ struct RemotePadView: View {
                 dpadSection
                 systemSection
                 volumeChannelSection
-                mediaSection
-                numberSection
-                inputSection
-                appSection
+                if !controller.isTCL {
+                    mediaSection
+                    numberSection
+                    inputSection
+                    appSection
+                }
             }
             .padding()
         }
@@ -92,7 +94,9 @@ struct RemotePadView: View {
             }
             HStack(spacing: 12) {
                 RepeatKeyButton(icon: "chevron.down.circle", label: "频道−", keyCode: 167) { controller.sendKey($0) }
-                KeyButton(icon: "rectangle.connected.to.line.below", label: "输入源", keyCode: 178) { controller.sendKey($0) }
+                if !controller.isTCL {
+                    KeyButton(icon: "rectangle.connected.to.line.below", label: "输入源", keyCode: 178) { controller.sendKey($0) }
+                }
                 RepeatKeyButton(icon: "chevron.up.circle", label: "频道+", keyCode: 166) { controller.sendKey($0) }
             }
         }

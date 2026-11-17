@@ -130,6 +130,14 @@ struct DeviceListView: View {
                                     Text(device.name).foregroundColor(.primary)
                                     Text(device.host).font(.caption).foregroundColor(.secondary)
                                 }
+                                Spacer()
+                                Text(device.kind == .tcl ? "TCL" : "Google TV")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.accentColor.opacity(0.15))
+                                    .foregroundColor(.accentColor)
+                                    .cornerRadius(4)
                             }
                         }
                     }

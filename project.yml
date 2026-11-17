@@ -37,6 +37,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.tvremote.app
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_OBJC_BRIDGING_HEADER: TVRemote/TVRemote-Bridging-Header.h
         # 无签名构建，供巨魔商店(TrollStore)安装
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
