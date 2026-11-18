@@ -39,17 +39,41 @@ final class TCLRemote {
         var id: String { host }
     }
 
+    /// 单次连接的状态容器。
+    /// 每条 TCP 连接独立持有，避免旧连接的回调污染新连接的状态
+    /// （之前把 finished / hasConnected 放在实例上，重连时旧回调会把新连接误判为断开）。
+    private final class Session {
+        let conn: NWConnection
+        var handshakeDone = false
+        var completed = false
+        var cancelledByUs = false
+        init(conn: NWConnection) { self.conn = conn }
+    }
+
     private let clientName: String
     private let clientID: String
-    private var connection: NWConnection?
-    private var recvBuffer = Data()
-    private var useAES = false
     private let queue = DispatchQueue(label: "tvremote.tcl")
 
-    /// 连接意外断开时回调（主动 disconnect 不触发）
-    var onDisconnect: (() -> Void)?
+    private var session: Session?
+    private var recvBuffer = Data()
+    private var useAES = false
+
+    /// T-Cast 心跳：`150>>` / 电视回 `150>>YES`。
+    /// 电视约 20 秒收不到任何流量就会主动断开，必须每 5 秒发一次保活。
+    private var heartbeatTimer: DispatchSourceTimer?
+    private var lastActivity = Date()
+    private static let heartbeatInterval: TimeInterval = 5
+    private static let idleTimeout: TimeInterval = 35
+
+    /// 连接意外断开时回调（主动 disconnect 不触发），参数为断开原因
+    var onDisconnect: ((String) -> Void)?
+    /// 收到电视端主动下发的数据（用于诊断，判断电视为何断开）
+    var onIncoming: ((String) -> Void)?
+
+    private(set) var connectedAt: Date?
     private var hasConnected = false
-    private var closedIntentionally = false
+    /// 相同内容的消息只上报前几次，避免心跳刷屏
+    private var reportedMessages: [String: Int] = [:]
 
     init(clientName: String = "TV Remote") {
         self.clientName = clientName
@@ -180,73 +204,117 @@ final class TCLRemote {
 
     // MARK: - 连接与握手
 
-    func connect(host: String, completion: @escaping (Bool) -> Void) {
-        connection?.cancel()
-        recvBuffer.removeAll()
-        useAES = false
-        hasConnected = false
-        closedIntentionally = false
+    func connect(host: String, timeout: TimeInterval = 5, completion: @escaping (Bool) -> Void) {
+        // 清掉上一条连接，避免两条连接同时抢占电视（TCL 一般只允许一个遥控会话）
+        closeCurrent(markIntentional: true)
+
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        // TCP 层保活：避免 NAT / 路由器回收空闲长连接
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 10
+        tcp.keepaliveInterval = 5
+        tcp.keepaliveCount = 3
+        tcp.connectionTimeout = Int(timeout)
 
         let conn = NWConnection(
             host: NWEndpoint.Host(host),
             port: NWEndpoint.Port(rawValue: 6553)!,
-            using: .tcp
+            using: NWParameters(tls: nil, tcp: tcp)
         )
-        connection = conn
+        let s = Session(conn: conn)
+        session = s
+        recvBuffer.removeAll()
+        useAES = false
+        hasConnected = false
+        connectedAt = nil
+        reportedMessages.removeAll()
 
-        var finished = false
-        let lock = NSLock()
-
-        conn.stateUpdateHandler = { [weak self] state in
-            guard let self = self else { return }
+        conn.stateUpdateHandler = { [weak self, weak s] state in
+            // 只处理「当前这条」连接的回调：旧连接被 cancel 后的迟到回调必须丢弃，
+            // 否则会把刚建立的新连接误判为「断开」。
+            guard let self = self, let s = s, self.session === s else { return }
             switch state {
             case .ready:
+                self.connectedAt = Date()
                 self.sendRaw("159>>\(self.clientName)>>1>>\(self.clientID)>>1")
-                self.receiveFrame { frame in
-                    lock.lock()
-                    defer { lock.unlock() }
-                    guard !finished else { return }
-                    finished = true
-                    if let frame = frame, let text = String(data: frame, encoding: .utf8) {
-                        let fields = text.components(separatedBy: ">>")
-                        if fields.count > 6, fields[6] == "1" {
-                            self.useAES = true
-                        }
-                        self.hasConnected = true
-                        self.beginReceiveLoop()
-                        completion(true)
-                    } else {
-                        completion(false)
-                    }
+                self.readHandshake(session: s, completion: completion)
+
+            case .failed(let error):
+                if !s.handshakeDone {
+                    self.finishHandshake(session: s, ok: false, completion: completion)
+                    self.reportDisconnect(reason: "连接失败：\(error.localizedDescription)", session: s)
+                } else {
+                    self.reportDisconnect(reason: "网络错误：\(error.localizedDescription)", session: s)
                 }
-            case .failed, .cancelled:
-                lock.lock()
-                let wasFinished = finished
-                finished = true
-                lock.unlock()
-                if !wasFinished {
-                    completion(false)
-                } else if self.hasConnected {
-                    // 已连接后断开（电视关机 / 断网 / 系统挂起）
-                    self.notifyDisconnect()
+
+            case .cancelled:
+                if !s.handshakeDone {
+                    self.finishHandshake(session: s, ok: false, completion: completion)
+                } else {
+                    self.reportDisconnect(reason: s.cancelledByUs ? "" : "连接被关闭", session: s)
                 }
+
             default:
                 break
             }
         }
         conn.start(queue: queue)
 
-        // 连接超时保护：电视关机时 TCP 可能长时间处于 waiting 状态，
-        // 没有这一步会让上层重连循环卡死。
-        queue.asyncAfter(deadline: .now() + 4.0) {
-            lock.lock()
-            let already = finished
-            if !already { finished = true }
-            lock.unlock()
-            if !already {
-                conn.cancel()
-                completion(false)
+        // 连接到电视关机时 TCP 可能长时间处于 waiting，没有超时会让上层重连循环卡死
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self, weak s] in
+            guard let self = self, let s = s, self.session === s else { return }
+            guard !s.handshakeDone, !s.completed else { return }
+            s.cancelledByUs = true
+            conn.cancel()
+            self.finishHandshake(session: s, ok: false, completion: completion)
+        }
+    }
+
+    /// 握手只允许结算一次，超时 / 失败 / 成功三者互斥
+    private func finishHandshake(session s: Session, ok: Bool, completion: @escaping (Bool) -> Void) {
+        guard !s.completed else { return }
+        s.completed = true
+        s.handshakeDone = true
+        completion(ok)
+    }
+
+    private func readHandshake(session s: Session, completion: @escaping (Bool) -> Void) {
+        s.conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self, weak s] data, _, isComplete, error in
+            guard let self = self, let s = s, self.session === s else { return }
+            if let data = data, !data.isEmpty {
+                self.recvBuffer.append(data)
             }
+            guard self.recvBuffer.count >= 4 else {
+                if error != nil || isComplete {
+                    self.finishHandshake(session: s, ok: false, completion: completion)
+                } else {
+                    self.readHandshake(session: s, completion: completion)
+                }
+                return
+            }
+            let length = self.recvBuffer.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian
+            guard self.recvBuffer.count >= 4 + Int(length) else {
+                if error != nil || isComplete {
+                    self.finishHandshake(session: s, ok: false, completion: completion)
+                } else {
+                    self.readHandshake(session: s, completion: completion)
+                }
+                return
+            }
+            let payload = self.recvBuffer.subdata(in: 4..<(4 + Int(length)))
+            self.recvBuffer.removeSubrange(0..<(4 + Int(length)))
+
+            let text = String(data: payload, encoding: .utf8) ?? ""
+            let fields = text.components(separatedBy: ">>")
+            if fields.count > 6, fields[6] == "1" {
+                self.useAES = true
+            }
+            self.hasConnected = true
+            self.lastActivity = Date()
+            self.finishHandshake(session: s, ok: true, completion: completion)
+            self.startHeartbeat(session: s)
+            self.startReceiveLoop(session: s)
         }
     }
 
@@ -257,21 +325,61 @@ final class TCLRemote {
     }
 
     func disconnect() {
-        closedIntentionally = true
-        connection?.cancel()
-        connection = nil
-    }
-
-    /// 通知上层：连接意外断开（电视关机 / 断网 / App 被挂起）
-    private func notifyDisconnect() {
-        guard hasConnected, !closedIntentionally else { return }
-        hasConnected = false
-        DispatchQueue.main.async { [weak self] in
-            self?.onDisconnect?()
-        }
+        closeCurrent(markIntentional: true)
     }
 
     // MARK: - 内部
+
+    /// 心跳保活：每 5 秒 `150>>`（电视回 `150>>YES`）。
+    /// 连续 35 秒收不到任何回包就判定链路已死，主动断开交给上层重连（比等 TCP 超时快）。
+    private func startHeartbeat(session s: Session) {
+        stopHeartbeat()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + Self.heartbeatInterval,
+                       repeating: Self.heartbeatInterval)
+        timer.setEventHandler { [weak self, weak s] in
+            guard let self = self, let s = s, self.session === s, self.hasConnected else { return }
+            if Date().timeIntervalSince(self.lastActivity) > Self.idleTimeout {
+                self.reportDisconnect(reason: "电视长时间无响应（可能已关机或断网）", session: s)
+                s.cancelledByUs = true
+                s.conn.cancel()
+                return
+            }
+            self.send("150>>")
+        }
+        timer.resume()
+        heartbeatTimer = timer
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
+    }
+
+    private func closeCurrent(markIntentional: Bool) {
+        stopHeartbeat()
+        if let s = session {
+            s.cancelledByUs = markIntentional
+            s.conn.cancel()
+        }
+        session = nil
+        hasConnected = false
+        connectedAt = nil
+        recvBuffer.removeAll()
+    }
+
+    /// 只在「曾经握手成功」的连接上上报断线，且每条连接只报一次
+    private func reportDisconnect(reason: String, session s: Session) {
+        guard hasConnected, !s.cancelledByUs else { return }
+        stopHeartbeat()
+        hasConnected = false
+        let uptime = connectedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
+        connectedAt = nil
+        let text = reason.isEmpty ? "连接已断开" : reason
+        DispatchQueue.main.async { [weak self] in
+            self?.onDisconnect?("\(text)（本次连接存活 \(uptime) 秒）")
+        }
+    }
 
     private func send(_ text: String) {
         guard let payload = text.data(using: .utf8) else { return }
@@ -291,40 +399,61 @@ final class TCLRemote {
         var length = UInt32(payload.count).bigEndian
         var frame = Data(bytes: &length, count: 4)
         frame.append(payload)
-        connection?.send(content: frame, completion: .contentProcessed { _ in })
+        session?.conn.send(content: frame, completion: .contentProcessed { _ in })
     }
 
-    private func beginReceiveLoop() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] _, _, isComplete, error in
-            guard let self = self else { return }
-            if error != nil || isComplete {
-                self.notifyDisconnect()
+    /// 握手后的接收循环：不断读取，解析电视下发的消息并上报（用于诊断断开原因）
+    private func startReceiveLoop(session s: Session) {
+        s.conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self, weak s] data, _, isComplete, error in
+            guard let self = self, let s = s, self.session === s else { return }
+            if let data = data, !data.isEmpty {
+                self.lastActivity = Date()
+                self.recvBuffer.append(data)
+                self.drainIncoming(session: s)
+            }
+            if let error = error {
+                self.reportDisconnect(reason: "读取失败：\(error.localizedDescription)", session: s)
                 return
             }
-            self.beginReceiveLoop()
+            if isComplete {
+                self.reportDisconnect(reason: "电视主动关闭了连接", session: s)
+                return
+            }
+            self.startReceiveLoop(session: s)
         }
     }
 
-    private func receiveFrame(completion: @escaping (Data?) -> Void) {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            guard let self = self else { completion(nil); return }
-            if let data = data {
-                self.recvBuffer.append(data)
+    /// 按 4 字节长度拆帧；读不出合法帧时退化为文本上报，避免 buffer 越积越多
+    private func drainIncoming(session s: Session) {
+        var guardCount = 0
+        while recvBuffer.count >= 4, guardCount < 32 {
+            guardCount += 1
+            let raw = recvBuffer.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian
+            let length = Int(raw)
+            guard length > 0, length <= 65535 else {
+                reportIncoming(recvBuffer.prefix(80))
+                recvBuffer.removeAll()
+                return
             }
-            if self.recvBuffer.count >= 4 {
-                let length = self.recvBuffer.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian
-                if self.recvBuffer.count >= 4 + Int(length) {
-                    let payload = self.recvBuffer.subdata(in: 4..<(4 + Int(length)))
-                    self.recvBuffer.removeSubrange(0..<(4 + Int(length)))
-                    completion(payload)
-                    return
-                }
-            }
-            if error != nil || isComplete {
-                completion(nil)
-            } else {
-                self.receiveFrame(completion: completion)
-            }
+            guard recvBuffer.count >= 4 + length else { return }
+            let payload = recvBuffer.subdata(in: 4..<(4 + length))
+            recvBuffer.removeSubrange(0..<(4 + length))
+            reportIncoming(payload)
+        }
+    }
+
+    private func reportIncoming(_ data: Data) {
+        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // 心跳回包（150>>YES）每 5 秒一次，不写日志避免刷屏
+        if trimmed.hasPrefix("150>>") { return }
+        let shown = trimmed.count > 60 ? String(trimmed.prefix(60)) + "…" : trimmed
+        let count = (reportedMessages[shown] ?? 0) + 1
+        reportedMessages[shown] = count
+        guard count <= 3 else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.onIncoming?("TCL ← 收到「\(shown)」" + (count > 1 ? " ×\(count)" : ""))
         }
     }
 }

@@ -6,10 +6,14 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject var controller: RemoteController
     @State private var showDevices = false
+    @State private var showLogs = false
+    @State private var logsExpanded = false
+    @State private var toastText: String?
     @State private var manualIP = ""
 
     var body: some View {
@@ -17,10 +21,31 @@ struct ContentView: View {
             ZStack {
                 Color(.systemGroupedBackground).ignoresSafeArea()
 
-                if controller.state == .connected {
-                    RemotePadView()
+                if controller.shouldShowRemotePad {
+                    VStack(spacing: 0) {
+                        if let banner = controller.linkBanner {
+                            linkBannerView(banner)
+                        }
+                        RemotePadView()
+                    }
                 } else {
                     placeholderView
+                }
+
+                if let toast = toastText {
+                    VStack {
+                        Spacer()
+                        Text(toast)
+                            .font(.caption)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Color.black.opacity(0.78))
+                            .cornerRadius(18)
+                            .padding(.bottom, 32)
+                            .transition(.opacity)
+                    }
+                    .allowsHitTesting(false)
                 }
             }
             .navigationTitle(controller.currentDeviceName)
@@ -50,6 +75,49 @@ struct ContentView: View {
                 PairingView()
                     .environmentObject(controller)
             }
+            .sheet(isPresented: $showLogs) {
+                LogView()
+                    .environmentObject(controller)
+            }
+        }
+    }
+
+    // MARK: 顶部链路横幅
+
+    private func linkBannerView(_ banner: (text: String, isError: Bool)) -> some View {
+        HStack(spacing: 8) {
+            if banner.isError {
+                Image(systemName: "exclamationmark.triangle.fill")
+            } else {
+                ProgressView()
+                    .scaleEffect(0.65)
+                    .tint(.orange)
+            }
+            Text(banner.text)
+                .font(.caption)
+                .lineLimit(2)
+            Spacer(minLength: 6)
+            if banner.isError {
+                Button("重试") { controller.retryNow() }
+                    .font(.caption.bold())
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.22))
+                    .cornerRadius(8)
+            }
+        }
+        .foregroundColor(banner.isError ? .white : .primary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(banner.isError ? Color.red.opacity(0.9) : Color.orange.opacity(0.16))
+    }
+
+    private func showToast(_ text: String) {
+        withAnimation { toastText = text }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            withAnimation { toastText = nil }
         }
     }
 
@@ -188,22 +256,54 @@ struct ContentView: View {
     }
 
     private var logCard: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 3) {
-                if controller.logs.isEmpty {
-                    Text("暂无日志").font(.caption2).foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Button {
+                    withAnimation { logsExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: logsExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption2)
+                        Label("诊断日志（\(controller.logs.count)）",
+                              systemImage: "doc.text.magnifyingglass")
+                            .font(.subheadline)
+                    }
                 }
-                ForEach(Array(controller.logs.suffix(60).enumerated()), id: \.offset) { pair in
-                    Text(pair.element)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button {
+                    UIPasteboard.general.string = controller.exportLogText()
+                    showToast("日志已复制到剪贴板")
+                } label: {
+                    Label("复制", systemImage: "doc.on.doc").font(.caption)
                 }
+                .buttonStyle(.borderless)
+
+                Button {
+                    showLogs = true
+                } label: {
+                    Text("全部").font(.caption)
+                }
+                .buttonStyle(.borderless)
             }
-            .padding(.top, 6)
-        } label: {
-            Label("诊断日志（\(controller.logs.count)）", systemImage: "doc.text.magnifyingglass")
-                .font(.subheadline)
+
+            if logsExpanded {
+                VStack(alignment: .leading, spacing: 3) {
+                    if controller.logs.isEmpty {
+                        Text("暂无日志").font(.caption2).foregroundColor(.secondary)
+                    }
+                    ForEach(Array(controller.logs.suffix(80).enumerated()), id: \.offset) { pair in
+                        Text(pair.element)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.top, 2)
+            }
         }
         .padding(12)
         .background(Color(.secondarySystemGroupedBackground))
@@ -297,6 +397,10 @@ struct DeviceListView: View {
 
                 if !controller.currentDeviceName.isEmpty && controller.currentDeviceName != "未连接" {
                     Section {
+                        Button("断开连接") {
+                            controller.disconnect()
+                            dismiss()
+                        }
                         Button("断开并忘记设备", role: .destructive) {
                             controller.forget()
                             dismiss()
@@ -316,6 +420,50 @@ struct DeviceListView: View {
                 }
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("完成") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 日志全文（可选中 / 复制 / 分享）
+
+struct LogView: View {
+    @EnvironmentObject var controller: RemoteController
+    @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(controller.exportLogText())
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("诊断日志")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("完成") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button {
+                        UIPasteboard.general.string = controller.exportLogText()
+                        copied = true
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            copied = false
+                        }
+                    } label: {
+                        Label(copied ? "已复制" : "复制",
+                              systemImage: copied ? "checkmark" : "doc.on.doc")
+                    }
+                    ShareLink(item: controller.exportLogText()) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
                 }
             }
         }

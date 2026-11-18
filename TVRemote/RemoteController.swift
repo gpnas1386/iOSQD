@@ -24,6 +24,14 @@ final class RemoteController: NSObject, ObservableObject {
         case failed(String)
     }
 
+    /// 链路状态：与 state 分开，避免「短暂断线」把整个遥控界面切走
+    enum LinkState: Equatable {
+        case idle        // 未连接过
+        case online      // 已连接
+        case reconnecting // 断线重连中（界面保留，顶部提示）
+        case offline     // 多次重连失败（界面保留，可手动重试）
+    }
+
     enum ProtocolKind {
         case googleTV
         case tcl
@@ -66,9 +74,41 @@ final class RemoteController: NSObject, ObservableObject {
     @Published var autoReconnecting = false
     /// 是否启用断线自动重连（用户可关闭）
     @Published var autoReconnectEnabled = true
+    /// 链路状态（决定顶部横幅，而不决定是否显示遥控界面）
+    @Published var linkState: LinkState = .idle
+    /// 本次会话是否至少连上过一次：连过之后断线不再退回扫描页
+    @Published var hasConnectedOnce = false
+    /// 当前重连次数
+    @Published var reconnectAttempt = 0
+    /// 最近一次断开原因（展示在横幅里，便于反馈）
+    @Published var lastDisconnectReason = ""
 
     private var reconnectTask: Task<Void, Never>?
+    private var reconnectGeneration = 0
+    private var lastConnectedAt: Date?
     private var foregroundObserver: NSObjectProtocol?
+
+    /// 遥控界面是否显示：连过就一直保留，只有用户主动断开 / 忘记设备才回扫描页
+    var shouldShowRemotePad: Bool {
+        if state == .connected { return true }
+        if hasConnectedOnce && (state == .disconnected || state == .connecting) { return true }
+        return false
+    }
+
+    /// 顶部横幅文案（nil 表示不显示）
+    var linkBanner: (text: String, isError: Bool)? {
+        switch linkState {
+        case .reconnecting:
+            if lastDisconnectReason.isEmpty && reconnectAttempt <= 1 {
+                return ("正在连接电视…", false)
+            }
+            return ("连接中断，正在重连（第 \(max(reconnectAttempt, 1)) 次）…", false)
+        case .offline:
+            return ("连接已断开" + (lastDisconnectReason.isEmpty ? "" : "：\(lastDisconnectReason)"), true)
+        default:
+            return nil
+        }
+    }
 
     /// 当前是否使用 TCL 协议（TCL 协议不支持文本输入/应用启动/媒体键等）
     var isTCL: Bool { currentProtocol == .tcl }
@@ -114,7 +154,7 @@ final class RemoteController: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self = self else { return }
                 guard self.autoReconnectEnabled,
-                      self.state != .connected,
+                      self.linkState != .online,
                       !self.currentHost.isEmpty else { return }
                 self.appendLog("回到前台，自动重连 \(self.currentHost)")
                 self.startAutoReconnect(host: self.currentHost)
@@ -128,6 +168,8 @@ final class RemoteController: NSObject, ObservableObject {
             if saved.kind == "tcl" {
                 // 关键优化：TCL 设备直接重连，不再依赖「多屏互动」触发的广播发现
                 currentProtocol = .tcl
+                hasConnectedOnce = true          // 保留遥控界面，避免启动时又回到扫描页
+                linkState = .reconnecting
                 appendLog("直接重连上次的 TCL 设备，跳过扫描")
                 startAutoReconnect(host: saved.host)
             } else {
@@ -145,8 +187,11 @@ final class RemoteController: NSObject, ObservableObject {
     func refresh() {
         devices.removeAll()
         scanStatus = ["SSDP": "进行中", "TCL": "进行中", "Bonjour": "进行中"]
-        state = .searching
-        message = "正在搜索内网电视…"
+        // 已经连过电视时，扫描只在后台跑，不把用户踢回扫描页
+        if !hasConnectedOnce {
+            state = .searching
+            message = "正在搜索内网电视…"
+        }
         appendLog("──────── 开始新一轮扫描 ────────")
         startBrowsing()
     }
@@ -198,7 +243,8 @@ final class RemoteController: NSObject, ObservableObject {
                     self.mergeDevice(name: d.name, host: d.host, kind: .tcl)
                 }
                 // 电视重启后 IP 可能变化：重连中若发现新地址，切换过去
-                if self.autoReconnecting,
+                if self.linkState != .online,
+                   !self.currentHost.isEmpty,
                    let first = tclDevices.first,
                    first.host != self.currentHost {
                     self.appendLog("发现电视新地址 \(first.host)，切换重连目标")
@@ -223,6 +269,7 @@ final class RemoteController: NSObject, ObservableObject {
             try? await Task.sleep(nanoseconds: 6_000_000_000)
             guard let self = self else { return }
             self.isScanning = false
+            guard self.linkState != .online else { return }   // 已连上就别覆盖提示语
             if self.devices.isEmpty {
                 self.message = "未发现设备，请展开诊断日志查看详情"
                 self.appendLog("扫描结束：未发现任何设备")
@@ -282,9 +329,62 @@ final class RemoteController: NSObject, ObservableObject {
         }
     }
 
+    func clearLogs() {
+        logs.removeAll()
+        appendLog("日志已清空")
+    }
+
+    /// 导出可复制的完整诊断信息（反馈 bug 时一键复制发给开发者）
+    func exportLogText() -> String {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let info = Bundle.main.infoDictionary
+        let ver = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+
+        var lines: [String] = [
+            "TVRemote 诊断日志",
+            "导出时间：\(df.string(from: Date()))",
+            "版本：v\(ver) (\(build))",
+            "设备：\(currentDeviceName) @ \(currentHost.isEmpty ? "无" : currentHost)",
+            "协议：\(isTCL ? "TCL" : "Google TV")",
+            "状态：\(stateText) / 链路 \(linkText)",
+            "本机 Wi-Fi：\(wifiAddress.isEmpty ? "未连接" : wifiAddress)",
+            "自动重连：\(autoReconnectEnabled ? "开" : "关")",
+            ""
+        ]
+        lines.append(contentsOf: logs)
+        return lines.joined(separator: "\n")
+    }
+
+    private var stateText: String {
+        switch state {
+        case .searching: return "搜索中"
+        case .connecting: return "连接中"
+        case .waitingForPIN: return "等待配对码"
+        case .connected: return "已连接"
+        case .disconnected: return "未连接"
+        case .failed(let reason): return "失败(\(reason))"
+        }
+    }
+
+    private var linkText: String {
+        switch linkState {
+        case .idle: return "待机"
+        case .online: return "在线"
+        case .reconnecting: return "重连中(第 \(reconnectAttempt) 次)"
+        case .offline: return "离线"
+        }
+    }
+
     // MARK: - 连接 / 配对
 
     func select(_ device: Device) {
+        if device.host != currentHost {
+            // 换成另一台电视：这次会话的「连过」状态要重算
+            hasConnectedOnce = false
+            linkState = .reconnecting
+        }
         currentDeviceName = device.name
         currentHost = device.host
         switch device.kind {
@@ -347,11 +447,16 @@ final class RemoteController: NSObject, ObservableObject {
     // MARK: - 遥控命令
 
     func sendKey(_ keyCode: Int) {
-        guard state == .connected else { return }
-        if currentProtocol == .tcl, let key = Self.googleToTCL[keyCode] {
-            tclRemote?.sendKey(key)
+        if currentProtocol == .tcl {
+            // 重连期间 state 仍是 .connected（界面保留），但实际没有可用连接
+            guard let remote = tclRemote, linkState == .online,
+                  let key = Self.googleToTCL[keyCode] else {
+                return   // 重连中：界面顶部横幅已提示，直接丢弃按键
+            }
+            remote.sendKey(key)
             return
         }
+        guard state == .connected else { return }
         let inject = Proto.varintField(1, keyCode) + Proto.varintField(2, 3)
         send(Proto.message(field: 10, payload: inject))
     }
@@ -374,15 +479,21 @@ final class RemoteController: NSObject, ObservableObject {
     }
 
     func disconnect() {
+        reconnectGeneration += 1
         reconnectTask?.cancel()
         reconnectTask = nil
         autoReconnecting = false
         connection?.cancel()
         connection = nil
         tclRemote?.onDisconnect = nil
+        tclRemote?.onIncoming = nil
         tclRemote?.disconnect()
         tclRemote = nil
         state = .disconnected
+        linkState = .idle
+        hasConnectedOnce = false
+        reconnectAttempt = 0
+        lastDisconnectReason = ""
         currentApp = nil
         message = "已断开"
     }
@@ -415,51 +526,89 @@ final class RemoteController: NSObject, ObservableObject {
     private func connectTCL(host: String) {
         currentProtocol = .tcl
         currentHost = host
-        startAutoReconnect(host: host)
+        // 切换目标前先关掉旧连接，避免两条遥控会话互相踢
+        tclRemote?.onDisconnect = nil
+        tclRemote?.onIncoming = nil
+        tclRemote?.disconnect()
+        tclRemote = nil
+        startAutoReconnect(host: host, manual: true)
     }
 
     /// 自动重连循环：失败每 3 秒重试，最多 40 次（约 2 分钟）
     /// 每 3 次失败回退做一次扫描，以防电视 DHCP 换了 IP。
-    func startAutoReconnect(host: String) {
+    /// - Parameters:
+    ///   - initialDelay: 首次尝试前的等待（刚连上就断开时用来退避，避免抖动循环）
+    ///   - manual: 用户主动发起（忽略「自动重连」开关）
+    func startAutoReconnect(host: String, initialDelay: TimeInterval = 0, manual: Bool = false) {
+        guard manual || autoReconnectEnabled else { return }
+        reconnectGeneration += 1
+        let gen = reconnectGeneration
         reconnectTask?.cancel()
-        guard autoReconnectEnabled else { return }
         reconnectTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
+
+            if initialDelay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(initialDelay * 1_000_000_000))
+                guard !Task.isCancelled, self.reconnectGeneration == gen,
+                      self.linkState != .online else { return }
+            }
+
             var attempt = 0
-            while !Task.isCancelled {
+            while !Task.isCancelled, self.reconnectGeneration == gen {
                 attempt += 1
                 self.autoReconnecting = true
-                self.state = .connecting
+                self.reconnectAttempt = attempt
+                self.linkState = .reconnecting
+                // 关键：连过电视就保持遥控界面，只更新顶部横幅；没连过才回到扫描页
+                self.state = self.hasConnectedOnce ? .connected : .connecting
                 self.message = attempt == 1 ? "正在连接 \(host) …" : "正在重连（第 \(attempt) 次）…"
 
                 let tcl = TCLRemote()
+                tcl.onIncoming = { [weak self, weak tcl] text in
+                    Task { @MainActor in
+                        guard let self = self, let tcl = tcl, self.tclRemote === tcl else { return }
+                        self.appendLog(text)
+                    }
+                }
+                // 断线回调必须在 connect 之前挂上：否则「握手成功但立刻断开」会漏掉
+                tcl.onDisconnect = { [weak self, weak tcl] reason in
+                    Task { @MainActor in
+                        guard let self = self, let tcl = tcl, self.tclRemote === tcl else { return }
+                        self.handleLinkLost(reason: reason)
+                    }
+                }
+
                 let ok: Bool = await withCheckedContinuation { cont in
                     tcl.connect(host: host) { result in
                         cont.resume(returning: result)
                     }
                 }
-                if Task.isCancelled { return }
+                // 任务被取消（用户断开 / 又发起了新重连）：必须关掉这条连接，
+                // 否则孤儿连接会占着电视唯一的遥控通道，导致下一条连接被踢。
+                guard !Task.isCancelled, self.reconnectGeneration == gen else {
+                    tcl.onDisconnect = nil
+                    tcl.onIncoming = nil
+                    tcl.disconnect()
+                    return
+                }
 
                 if ok {
+                    self.tclRemote?.onDisconnect = nil
+                    self.tclRemote?.onIncoming = nil
+                    self.tclRemote?.disconnect()
                     self.tclRemote = tcl
                     self.currentProtocol = .tcl
+                    self.currentHost = host
                     self.state = .connected
+                    self.hasConnectedOnce = true
+                    self.linkState = .online
                     self.autoReconnecting = false
+                    self.reconnectAttempt = 0
+                    self.lastDisconnectReason = ""
+                    self.lastConnectedAt = Date()
                     self.message = "已连接，可以遥控了"
                     self.appendLog("TCL ✓ 连接成功（第 \(attempt) 次）")
                     self.saveDevice()
-                    // 连接断开时自动进入重连
-                    tcl.onDisconnect = { [weak self] in
-                        Task { @MainActor in
-                            guard let self = self else { return }
-                            self.appendLog("TCL ✗ 连接已断开")
-                            self.state = .disconnected
-                            self.message = "连接断开，正在自动重连…"
-                            if self.autoReconnectEnabled {
-                                self.startAutoReconnect(host: self.currentHost)
-                            }
-                        }
-                    }
                     return
                 }
 
@@ -469,8 +618,16 @@ final class RemoteController: NSObject, ObservableObject {
                     self.startBrowsing()
                 }
                 if attempt >= 40 {
-                    self.state = .failed("多次重连失败")
                     self.autoReconnecting = false
+                    self.linkState = .offline
+                    if self.lastDisconnectReason.isEmpty {
+                        self.lastDisconnectReason = "多次连接失败，请确认电视已开机"
+                    }
+                    if self.hasConnectedOnce {
+                        self.state = .connected      // 保留遥控界面，用户可点横幅重试
+                    } else {
+                        self.state = .failed("多次重连失败")
+                    }
                     self.message = "无法连接电视，请确认电视已开机"
                     return
                 }
@@ -479,13 +636,47 @@ final class RemoteController: NSObject, ObservableObject {
         }
     }
 
+    /// 连接意外断开：不去切界面，进入静默重连
+    private func handleLinkLost(reason: String) {
+        guard linkState == .online else { return }
+        let uptime = lastConnectedAt.map { Date().timeIntervalSince($0) } ?? 0
+        appendLog("TCL ✗ 连接断开：\(reason)")
+        lastDisconnectReason = reason
+        linkState = .reconnecting
+        autoReconnecting = true
+        reconnectAttempt = 0
+        tclRemote = nil
+        if hasConnectedOnce {
+            state = .connected               // 关键：遥控界面保持不动，只弹横幅
+        }
+        message = "连接中断，正在重连…"
+
+        if autoReconnectEnabled {
+            // 刚连上就断（<2 秒）说明电视端在拒绝这条连接，先退避再试，避免疯狂抖动
+            startAutoReconnect(host: currentHost, initialDelay: uptime < 2 ? 2 : 0)
+        } else {
+            linkState = .offline
+        }
+    }
+
+    /// 用户点横幅上的「重试」
+    func retryNow() {
+        guard !currentHost.isEmpty else {
+            refresh()
+            return
+        }
+        appendLog("手动重试连接 \(currentHost)")
+        startAutoReconnect(host: currentHost, manual: true)
+    }
+
     func setAutoReconnect(_ enabled: Bool) {
         autoReconnectEnabled = enabled
         if enabled {
-            if state != .connected && !currentHost.isEmpty {
+            if linkState != .online && !currentHost.isEmpty {
                 startAutoReconnect(host: currentHost)
             }
         } else {
+            reconnectGeneration += 1
             reconnectTask?.cancel()
             reconnectTask = nil
             autoReconnecting = false
@@ -616,6 +807,9 @@ final class RemoteController: NSObject, ObservableObject {
         } else if fields[40] != nil {
             saveDevice()
             state = .connected
+            linkState = .online
+            hasConnectedOnce = true
+            lastConnectedAt = Date()
             message = "已连接，可以遥控了"
         }
     }
