@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct RemotePadView: View {
     @EnvironmentObject var controller: RemoteController
@@ -19,7 +20,9 @@ struct RemotePadView: View {
                 dpadSection
                 systemSection
                 volumeChannelSection
-                if !controller.isTCL {
+                if controller.isTCL {
+                    TextInputSection()
+                } else {
                     mediaSection
                     numberSection
                     inputSection
@@ -180,6 +183,96 @@ struct RemotePadView: View {
                 .buttonStyle(.bordered)
                 .disabled(appID.isEmpty)
             }
+        }
+    }
+}
+
+// MARK: - 文字输入（TCL：直接注入到电视当前输入框）
+
+struct TextInputSection: View {
+    @EnvironmentObject var controller: RemoteController
+    @State private var text = ""
+    @State private var hint: String?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("文字输入", systemImage: "keyboard")
+                .font(.subheadline.bold())
+
+            Text("先在电视上打开搜索页、点一下输入框让它有光标，再回到这里打字发送。电视键盘太难用的时候走这条路。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("输入要发到电视的文字", text: $text, axis: .vertical)
+                    .lineLimit(1...4)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($focused)
+
+                Button {
+                    send(confirm: false)
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 30))
+                }
+                .disabled(trimmed.isEmpty)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    send(confirm: false)
+                } label: {
+                    Label("只发文字", systemImage: "text.cursor")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    send(confirm: true)
+                } label: {
+                    Label("发送并搜索", systemImage: "magnifyingglass")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .disabled(trimmed.isEmpty)
+
+            if let hint = hint {
+                Text(hint)
+                    .font(.caption2)
+                    .foregroundColor(hint.contains("失败") ? .red : .secondary)
+            }
+        }
+        .padding(12)
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
+    }
+
+    private var trimmed: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func send(confirm: Bool) {
+        let value = trimmed
+        guard !value.isEmpty else { return }
+        guard controller.sendText(value) else {
+            hint = "发送失败：连接已断开或正在重连"
+            return
+        }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        focused = false
+        if confirm {
+            hint = "已发送，正在触发搜索…"
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                controller.sendConfirm()
+            }
+        } else {
+            hint = "已发送 \(value.count) 字"
         }
     }
 }

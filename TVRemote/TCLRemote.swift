@@ -31,6 +31,7 @@ final class TCLRemote {
         case mute = 23
         case chUp = 27
         case chDown = 28
+        case enter = 68
     }
 
     struct Device {
@@ -322,6 +323,29 @@ final class TCLRemote {
 
     func sendKey(_ key: Key) {
         send("149>>\(key.rawValue)")
+    }
+
+    /// 文本注入：T-Cast 的 IME 指令 `155>><text>`（UTF-8 明文，未加密时原样发送）。
+    /// 前提：电视端必须先把光标落在可输入的框里（如搜索框），否则电视会忽略。
+    /// 协议用 `>>` 分隔字段且没有转义规则，文本里的 `>>` 会导致解析歧义，这里替换掉。
+    @discardableResult
+    func sendText(_ text: String) -> Bool {
+        var cleaned = text
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: ">>", with: "> >")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, hasConnected else { return false }
+        if cleaned.count > 200 {
+            cleaned = String(cleaned.prefix(200))
+        }
+        send("155>>\(cleaned)")
+        return true
+    }
+
+    /// 回车 / 确认（搜索框里触发搜索）
+    func sendEnter() {
+        sendKey(.enter)
     }
 
     func disconnect() {

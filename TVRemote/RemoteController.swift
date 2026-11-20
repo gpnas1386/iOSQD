@@ -461,14 +461,39 @@ final class RemoteController: NSObject, ObservableObject {
         send(Proto.message(field: 10, payload: inject))
     }
 
-    func sendText(_ text: String) {
-        guard state == .connected, !text.isEmpty else { return }
-        guard currentProtocol != .tcl else { return } // TCL 协议暂不支持文本输入
-        let last = max(text.utf16.count - 1, 0)
-        let object = Proto.varintField(1, last) + Proto.varintField(2, last) + Proto.stringField(3, text)
+    /// 向电视当前的输入框注入文字。
+    /// TCL 用 T-Cast 的 `155>>` 文本注入；Google TV 走 IME 批次。
+    /// 返回值表示是否真的发出去了（重连中会返回 false）。
+    @discardableResult
+    func sendText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        if currentProtocol == .tcl {
+            guard let remote = tclRemote, linkState == .online else { return false }
+            let ok = remote.sendText(trimmed)
+            if ok { appendLog("TCL → 注入文字（\(trimmed.count) 字）") }
+            return ok
+        }
+
+        guard state == .connected else { return false }
+        let last = max(trimmed.utf16.count - 1, 0)
+        let object = Proto.varintField(1, last) + Proto.varintField(2, last) + Proto.stringField(3, trimmed)
         let edit = Proto.varintField(1, 1) + Proto.message(field: 2, payload: object)
         let batch = Proto.varintField(1, imeCounter) + Proto.varintField(2, imeFieldCounter) + Proto.message(field: 3, payload: edit)
         send(Proto.message(field: 21, payload: batch))
+        return true
+    }
+
+    /// 回车 / 确认（TCL 搜索框里用来触发搜索）
+    func sendConfirm() {
+        if currentProtocol == .tcl {
+            guard let remote = tclRemote, linkState == .online else { return }
+            remote.sendEnter()
+            appendLog("TCL → 回车")
+            return
+        }
+        sendKey(66)
     }
 
     func launch(_ appID: String) {

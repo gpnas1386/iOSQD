@@ -1,6 +1,6 @@
 # 内网电视遥控器（iOS 版 / TrollStore 巨魔安装）
 
-原生 iPhone 遥控 **Android TV / Google TV** 的应用，基于 Google 官方 **Android TV Remote Protocol v2**。无需红外、无需 ADB、无需开发者模式，手机与电视连同一 Wi-Fi 即可遥控。
+原生 iPhone 遥控 **TCL / 雷鸟 / Android TV / Google TV** 的应用。内置两套协议：TCL 系（雷鸟同系）的 **T-Cast**，局域网直连、无需配对码；Google 官方 **Android TV Remote Protocol v2**，首次 PIN 配对。无需红外、无需 ADB、无需开发者模式，手机与电视连同一 Wi-Fi 即可遥控。
 
 > 目标系统：**iOS 16.0 – 16.6.1**（TrollStore 2 支持范围）；协议层兼容 iOS 13+。
 > 适用电视：Android TV / Google TV / 安卓系统智能电视（小米、索尼、海信、TCL、NVIDIA Shield、Chromecast with Google TV 等）。LG WebOS、三星 Tizen 不支持。
@@ -9,7 +9,7 @@
 
 | 功能 | 说明 |
 |------|------|
-| 设备自动发现 | Bonjour/mDNS 扫描 `_androidtvremote2._tcp` 自动列出内网电视 |
+| 设备自动发现 | 三路并行：TCL UDP 6537 广播、SSDP、Bonjour（`_androidtvremote2._tcp`） |
 | 手动连接 | 输入电视 IP 直接连接 |
 | PIN 配对 | 首次连接输入电视显示的 6 位配对码，之后自动重连 |
 | 方向键 + OK | 圆形导航盘，长按连续移动 |
@@ -17,9 +17,9 @@
 | 音量 / 静音 | 长按连续调节 |
 | 频道 / 数字键 | 频道切换与 0-9 数字输入 |
 | 媒体播放 | 播放暂停 / 上一个 / 下一个 / 快退 / 快进 |
-| 文字输入 | 发送文字到电视输入框（搜索框等） |
+| 文字输入 | 手机打字直接注入电视输入框：TCL 走 T-Cast `155>>` 指令，Android TV 走 IME 批次；支持「只发文字」和「发送并搜索」 |
 | 打开应用/链接 | 输入包名或网址直接打开 |
-| 电源 | 开关机 / 待机唤醒 |
+| 电源 | 关机 / 待机（TCL 协议下仅关机，开机待验证 WOL） |
 
 ## 发现机制（v1.2.0 起）
 
