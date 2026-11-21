@@ -395,6 +395,23 @@ struct DeviceListView: View {
                     }
                 }
 
+                Section("设置") {
+                    Toggle(isOn: Binding(
+                        get: { controller.hapticsEnabled },
+                        set: { newValue in
+                            controller.hapticsEnabled = newValue
+                            if newValue { Haptics.key() }   // 开启时立刻给一次手感
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("按键震动反馈")
+                            Text("按遥控键时轻微震动；长按连发做了节流，不会震得手麻")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
                 if !controller.currentDeviceName.isEmpty && controller.currentDeviceName != "未连接" {
                     Section {
                         Button("断开连接") {

@@ -31,6 +31,7 @@ struct RemotePadView: View {
             }
             .padding()
         }
+        .onAppear { Haptics.prepare() }
     }
 
     // MARK: 电源
@@ -263,7 +264,7 @@ struct TextInputSection: View {
             hint = "发送失败：连接已断开或正在重连"
             return
         }
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        Haptics.success()
         focused = false
         if confirm {
             hint = "已发送，正在触发搜索…"

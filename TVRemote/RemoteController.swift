@@ -83,6 +83,17 @@ final class RemoteController: NSObject, ObservableObject {
     /// 最近一次断开原因（展示在横幅里，便于反馈）
     @Published var lastDisconnectReason = ""
 
+    /// 是否启用按键震动反馈（默认开，持久化）
+    @Published var hapticsEnabled: Bool = {
+        let stored = UserDefaults.standard.object(forKey: "haptics.enabled") as? Bool
+        return stored ?? true
+    }() {
+        didSet {
+            UserDefaults.standard.set(hapticsEnabled, forKey: "haptics.enabled")
+            Haptics.enabled = hapticsEnabled
+        }
+    }
+
     private var reconnectTask: Task<Void, Never>?
     private var reconnectGeneration = 0
     private var lastConnectedAt: Date?
@@ -143,6 +154,7 @@ final class RemoteController: NSObject, ObservableObject {
     override init() {
         super.init()
         identity = IdentityStore.loadIdentity()
+        Haptics.enabled = hapticsEnabled
         scanStatus = ["SSDP": "待扫描", "TCL": "待扫描", "Bonjour": "待扫描"]
 
         // 从后台回到前台时，若还没连上就自动重连（TCP 长连接会被系统挂断）
@@ -454,11 +466,13 @@ final class RemoteController: NSObject, ObservableObject {
                 return   // 重连中：界面顶部横幅已提示，直接丢弃按键
             }
             remote.sendKey(key)
+            Haptics.key()
             return
         }
         guard state == .connected else { return }
         let inject = Proto.varintField(1, keyCode) + Proto.varintField(2, 3)
         send(Proto.message(field: 10, payload: inject))
+        Haptics.key()
     }
 
     /// 向电视当前的输入框注入文字。
@@ -633,6 +647,7 @@ final class RemoteController: NSObject, ObservableObject {
                     self.lastConnectedAt = Date()
                     self.message = "已连接，可以遥控了"
                     self.appendLog("TCL ✓ 连接成功（第 \(attempt) 次）")
+                    Haptics.success()
                     self.saveDevice()
                     return
                 }
@@ -666,6 +681,7 @@ final class RemoteController: NSObject, ObservableObject {
         guard linkState == .online else { return }
         let uptime = lastConnectedAt.map { Date().timeIntervalSince($0) } ?? 0
         appendLog("TCL ✗ 连接断开：\(reason)")
+        Haptics.warning()
         lastDisconnectReason = reason
         linkState = .reconnecting
         autoReconnecting = true
