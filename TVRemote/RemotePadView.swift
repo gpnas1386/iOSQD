@@ -2,7 +2,7 @@
 //  RemotePadView.swift
 //  TVRemote
 //
-//  遥控器界面
+//  遥控器界面：按用户自定义布局渲染按键网格
 //
 
 import SwiftUI
@@ -10,147 +10,68 @@ import UIKit
 
 struct RemotePadView: View {
     @EnvironmentObject var controller: RemoteController
+    @EnvironmentObject var store: PadLayoutStore
+
     @State private var text = ""
     @State private var appID = ""
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 20) {
-                powerSection
-                dpadSection
-                systemSection
-                volumeChannelSection
+            VStack(spacing: 16) {
+                keyGrid
+
                 if controller.isTCL {
                     TextInputSection()
                 } else {
-                    mediaSection
-                    numberSection
                     inputSection
                     appSection
                 }
             }
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 28)
         }
         .onAppear { Haptics.prepare() }
     }
 
-    // MARK: 电源
+    // MARK: 按键网格
 
-    private var powerSection: some View {
-        Button {
-            controller.sendKey(26)
-        } label: {
-            Image(systemName: "power")
-                .font(.system(size: 26))
-                .foregroundColor(.white)
-                .frame(width: 64, height: 64)
-                .background(Circle().fill(Color.red.opacity(0.85)))
-        }
-        .buttonStyle(ScaleButtonStyle())
+    private var visibleKeys: [PadKey] {
+        store.layout.keys.filter { !(controller.isTCL && $0.googleOnly) }
     }
 
-    // MARK: 方向键圆盘
+    private var gridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 10),
+              count: store.layout.safeColumns)
+    }
 
-    private var dpadSection: some View {
-        VStack(spacing: 12) {
-            RepeatKeyButton(icon: "chevron.up", keyCode: 19) { controller.sendKey($0) }
-                .frame(width: 72, height: 72)
-            HStack(spacing: 12) {
-                RepeatKeyButton(icon: "chevron.left", keyCode: 21) { controller.sendKey($0) }
-                    .frame(width: 72, height: 72)
-                Button {
-                    controller.sendKey(23)
-                } label: {
-                    Text("OK")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .frame(width: 72, height: 72)
-                        .background(Circle().fill(Color.accentColor))
+    @ViewBuilder
+    private var keyGrid: some View {
+        if visibleKeys.isEmpty {
+            VStack(spacing: 10) {
+                Image(systemName: "square.grid.3x3")
+                    .font(.system(size: 30))
+                    .foregroundColor(.secondary)
+                Text("布局里还没有按键")
+                    .font(.subheadline)
+                Text("点右上角的排版按钮添加")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 40)
+        } else {
+            LazyVGrid(columns: gridColumns, spacing: 10) {
+                ForEach(visibleKeys) { key in
+                    PadKeyButton(key: key, showTitle: store.layout.showTitles) { code in
+                        controller.sendKey(code)
+                    }
                 }
-                .buttonStyle(ScaleButtonStyle())
-                RepeatKeyButton(icon: "chevron.right", keyCode: 22) { controller.sendKey($0) }
-                    .frame(width: 72, height: 72)
-            }
-            RepeatKeyButton(icon: "chevron.down", keyCode: 20) { controller.sendKey($0) }
-                .frame(width: 72, height: 72)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    // MARK: 返回 / 主页 / 菜单
-
-    private var systemSection: some View {
-        HStack(spacing: 12) {
-            KeyButton(icon: "arrow.uturn.backward", label: "返回", keyCode: 4) { controller.sendKey($0) }
-            KeyButton(icon: "house.fill", label: "主页", keyCode: 3) { controller.sendKey($0) }
-            KeyButton(icon: "line.3.horizontal", label: "菜单", keyCode: 82) { controller.sendKey($0) }
-        }
-    }
-
-    // MARK: 音量 / 频道
-
-    private var volumeChannelSection: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                RepeatKeyButton(icon: "speaker.minus.fill", label: "音量−", keyCode: 25) { controller.sendKey($0) }
-                KeyButton(icon: "speaker.slash.fill", label: "静音", keyCode: 164) { controller.sendKey($0) }
-                RepeatKeyButton(icon: "speaker.plus.fill", label: "音量+", keyCode: 24) { controller.sendKey($0) }
-            }
-            HStack(spacing: 12) {
-                RepeatKeyButton(icon: "chevron.down.circle", label: "频道−", keyCode: 167) { controller.sendKey($0) }
-                if !controller.isTCL {
-                    KeyButton(icon: "rectangle.connected.to.line.below", label: "输入源", keyCode: 178) { controller.sendKey($0) }
-                }
-                RepeatKeyButton(icon: "chevron.up.circle", label: "频道+", keyCode: 166) { controller.sendKey($0) }
             }
         }
     }
 
-    // MARK: 媒体
-
-    private var mediaSection: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                KeyButton(icon: "backward.fill", label: "快退", keyCode: 89) { controller.sendKey($0) }
-                KeyButton(icon: "backward.end.fill", label: "上一个", keyCode: 88) { controller.sendKey($0) }
-                KeyButton(icon: "playpause.fill", label: "播放", keyCode: 85) { controller.sendKey($0) }
-                KeyButton(icon: "forward.end.fill", label: "下一个", keyCode: 87) { controller.sendKey($0) }
-                KeyButton(icon: "forward.fill", label: "快进", keyCode: 90) { controller.sendKey($0) }
-            }
-            HStack(spacing: 12) {
-                KeyButton(icon: "magnifyingglass", label: "搜索", keyCode: 84) { controller.sendKey($0) }
-                KeyButton(icon: "gearshape.fill", label: "设置", keyCode: 176) { controller.sendKey($0) }
-                KeyButton(icon: "mic.fill", label: "语音", keyCode: 219) { controller.sendKey($0) }
-            }
-        }
-    }
-
-    // MARK: 数字键
-
-    private var numberSection: some View {
-        let numbers: [(String, Int)] = [
-            ("1", 8), ("2", 9), ("3", 10),
-            ("4", 11), ("5", 12), ("6", 13),
-            ("7", 14), ("8", 15), ("9", 16),
-            ("0", 7)
-        ]
-        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
-            ForEach(numbers, id: \.1) { item in
-                Button {
-                    controller.sendKey(item.1)
-                } label: {
-                    Text(item.0)
-                        .font(.title3.bold())
-                        .frame(maxWidth: .infinity, minHeight: 48)
-                        .background(Color(.secondarySystemBackground))
-                        .cornerRadius(12)
-                }
-                .buttonStyle(ScaleButtonStyle())
-            }
-        }
-    }
-
-    // MARK: 文本输入
+    // MARK: 文字输入（Google TV）
 
     private var inputSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -168,7 +89,7 @@ struct RemotePadView: View {
         }
     }
 
-    // MARK: 打开应用
+    // MARK: 打开应用（Google TV）
 
     private var appSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -185,6 +106,86 @@ struct RemotePadView: View {
                 .disabled(appID.isEmpty)
             }
         }
+    }
+}
+
+// MARK: - 自定义按键按钮
+
+struct PadKeyButton: View {
+    let key: PadKey
+    var showTitle: Bool = true
+    let action: (Int) -> Void
+
+    @State private var timer: Timer?
+
+    var body: some View {
+        Group {
+            if key.holdRepeat {
+                labelView
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .onLongPressGesture(minimumDuration: 0.01,
+                                        maximumDistance: 24,
+                                        pressing: { isPressing in
+                                            if isPressing { start() } else { stop() }
+                                        },
+                                        perform: {})
+            } else {
+                Button {
+                    action(key.keyCode)
+                } label: {
+                    labelView
+                }
+                .buttonStyle(ScaleButtonStyle())
+            }
+        }
+    }
+
+    private var labelView: some View {
+        VStack(spacing: 4) {
+            if key.icon.isEmpty {
+                Text(key.title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+            } else {
+                Image(systemName: key.icon)
+                    .font(.system(size: 21, weight: .medium))
+                if showTitle {
+                    Text(key.title)
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+            }
+        }
+        .foregroundColor(KeyPalette.foreground(key.style))
+        .frame(maxWidth: .infinity)
+        .frame(height: 62)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(KeyPalette.background(key.style))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(key.style == .ghost ? Color.secondary.opacity(0.35) : Color.clear,
+                              lineWidth: 1.2)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func start() {
+        guard timer == nil else { return }
+        action(key.keyCode)
+        let t = Timer(timeInterval: 0.25, repeats: true) { _ in
+            action(key.keyCode)
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private func stop() {
+        timer?.invalidate()
+        timer = nil
     }
 }
 
@@ -275,84 +276,6 @@ struct TextInputSection: View {
         } else {
             hint = "已发送 \(value.count) 字"
         }
-    }
-}
-
-// MARK: - 普通按键
-
-struct KeyButton: View {
-    let icon: String
-    let label: String
-    let keyCode: Int
-    let action: (Int) -> Void
-
-    var body: some View {
-        Button {
-            action(keyCode)
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 19))
-                Text(label)
-                    .font(.caption2)
-            }
-            .frame(maxWidth: .infinity, minHeight: 54)
-            .background(Color(.secondarySystemBackground))
-            .cornerRadius(12)
-        }
-        .buttonStyle(ScaleButtonStyle())
-    }
-}
-
-// MARK: - 长按重复按键（方向 / 音量 / 频道）
-
-struct RepeatKeyButton: View {
-    let icon: String
-    var label: String? = nil
-    let keyCode: Int
-    let action: (Int) -> Void
-    @State private var timer: Timer?
-
-    init(icon: String, label: String? = nil, keyCode: Int, action: @escaping (Int) -> Void) {
-        self.icon = icon
-        self.label = label
-        self.keyCode = keyCode
-        self.action = action
-    }
-
-    var body: some View {
-        VStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 20))
-            if let label = label {
-                Text(label)
-                    .font(.caption2)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(14)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in start() }
-                .onEnded { _ in stop() }
-        )
-    }
-
-    private func start() {
-        guard timer == nil else { return }
-        action(keyCode)
-        let t = Timer(timeInterval: 0.25, repeats: true) { _ in
-            action(keyCode)
-        }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
-    }
-
-    private func stop() {
-        timer?.invalidate()
-        timer = nil
     }
 }
 

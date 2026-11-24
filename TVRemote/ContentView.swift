@@ -10,8 +10,10 @@ import UIKit
 
 struct ContentView: View {
     @EnvironmentObject var controller: RemoteController
+    @EnvironmentObject var layoutStore: PadLayoutStore
     @State private var showDevices = false
     @State private var showLogs = false
+    @State private var showLayoutEditor = false
     @State private var logsExpanded = false
     @State private var toastText: String?
     @State private var manualIP = ""
@@ -66,6 +68,18 @@ struct ContentView: View {
                         Image(systemName: "tv.badge.wifi")
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showLayoutEditor = true
+                    } label: {
+                        Image(systemName: "square.grid.3x3")
+                    }
+                }
+            }
+            .sheet(isPresented: $showLayoutEditor) {
+                LayoutEditorView()
+                    .environmentObject(layoutStore)
+                    .environmentObject(controller)
             }
             .sheet(isPresented: $showDevices) {
                 DeviceListView()
