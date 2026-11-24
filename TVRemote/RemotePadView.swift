@@ -16,6 +16,18 @@ struct RemotePadView: View {
     @State private var appID = ""
 
     var body: some View {
+        Group {
+            if store.layout.style == .siri {
+                SiriRemotePad()
+            } else {
+                gridPad
+            }
+        }
+    }
+
+    // MARK: 网格模式
+
+    private var gridPad: some View {
         ScrollView {
             VStack(spacing: 16) {
                 keyGrid

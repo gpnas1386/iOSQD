@@ -25,13 +25,19 @@ struct LayoutEditorView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    settingsCard
-                    editorGrid
-                    if store.layout.keys.isEmpty {
-                        emptyHint
+                    styleCard
+
+                    if store.layout.style == .grid {
+                        settingsCard
+                        editorGrid
+                        if store.layout.keys.isEmpty {
+                            emptyHint
+                        }
+                        addButton
+                        tipView
+                    } else {
+                        siriHint
                     }
-                    addButton
-                    tipView
                 }
                 .padding(16)
             }
@@ -47,11 +53,13 @@ struct LayoutEditorView: View {
                             Label("恢复默认布局", systemImage: "arrow.counterclockwise")
                         }
                         Button {
+                            store.setStyle(.grid)
                             store.apply(.compactLayout())
                         } label: {
                             Label("精简布局", systemImage: "square.grid.3x3")
                         }
                         Button {
+                            store.setStyle(.grid)
                             store.apply(.fullLayout())
                         } label: {
                             Label("全功能布局", systemImage: "square.grid.3x3.fill")
@@ -85,6 +93,70 @@ struct LayoutEditorView: View {
                 Text("当前的自定义排版会被覆盖。")
             }
         }
+    }
+
+    // MARK: 界面风格
+
+    private var styleCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("界面风格")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Picker("界面风格", selection: styleBinding) {
+                ForEach(PadStyle.allCases) { item in
+                    Text(item.title).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(store.layout.style.subtitle)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+    }
+
+    private var styleBinding: Binding<PadStyle> {
+        Binding(
+            get: { store.layout.style },
+            set: { store.setStyle($0) }
+        )
+    }
+
+    private var siriHint: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "circle.circle")
+                    .font(.system(size: 28))
+                    .foregroundColor(.accentColor)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("圆盘模式")
+                        .font(.subheadline.weight(.semibold))
+                    Text("大圆盘 + 返回 / 主页 / 菜单 + 音量条，和 Apple TV 遥控器一致。")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Divider()
+
+            Text("圆盘上的方向和 OK 是固定的。想自己排按键、换图标、改行列数，把上面的风格切到「网格」。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
     }
 
     // MARK: 设置卡片

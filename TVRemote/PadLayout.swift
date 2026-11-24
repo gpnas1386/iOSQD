@@ -63,12 +63,61 @@ struct PadKey: Codable, Identifiable, Equatable, Hashable {
     var googleOnly: Bool = false
 }
 
+// MARK: - 界面风格
+
+enum PadStyle: String, Codable, CaseIterable, Identifiable {
+    /// Apple TV 遥控器风格：一个大圆盘 + 一排常用键
+    case siri
+    /// 自由网格：每个按键都能自己排
+    case grid
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .siri: return "圆盘"
+        case .grid: return "网格"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .siri: return "Apple TV 风格：大圆盘 + 一排常用键，主界面最干净"
+        case .grid: return "自由网格：每个按键都能自己排、自己换图标"
+        }
+    }
+}
+
 // MARK: - 一套布局
 
 struct PadLayout: Codable, Equatable {
-    var columns: Int = 4
-    var showTitles: Bool = true
-    var keys: [PadKey] = []
+    var columns: Int
+    var showTitles: Bool
+    var keys: [PadKey]
+    var style: PadStyle
+
+    init(columns: Int = 4,
+         showTitles: Bool = true,
+         keys: [PadKey] = [],
+         style: PadStyle = .siri) {
+        self.columns = columns
+        self.showTitles = showTitles
+        self.keys = keys
+        self.style = style
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case columns, showTitles, keys, style
+    }
+
+    /// 手写解码，保证旧版本存下的布局（没有 style 字段）不会整个失效
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        columns = try container.decodeIfPresent(Int.self, forKey: .columns) ?? 4
+        showTitles = try container.decodeIfPresent(Bool.self, forKey: .showTitles) ?? true
+        keys = try container.decodeIfPresent([PadKey].self, forKey: .keys) ?? []
+        style = try container.decodeIfPresent(PadStyle.self, forKey: .style) ?? .siri
+    }
 
     var safeColumns: Int { min(max(columns, 3), 5) }
 }
@@ -103,7 +152,7 @@ extension PadLayout {
         add(167, "频道−", "chevron.down.circle", repeatable: true)
         add(166, "频道+", "chevron.up.circle", repeatable: true)
 
-        return PadLayout(columns: 4, showTitles: true, keys: keys)
+        return PadLayout(columns: 4, showTitles: true, keys: keys, style: .siri)
     }
 
     /// 精简：只留最常用的 9 个键
@@ -126,7 +175,7 @@ extension PadLayout {
 
         add(164, "静音", "speaker.slash.fill")
 
-        return PadLayout(columns: 4, showTitles: true, keys: keys)
+        return PadLayout(columns: 4, showTitles: true, keys: keys, style: .siri)
     }
 
     /// 全功能：默认布局 + 媒体 + 数字 + 设置（Google 专用键在 TCL 下自动隐藏）
@@ -295,7 +344,9 @@ final class PadLayoutStore: ObservableObject {
     }
 
     func apply(_ preset: PadLayout) {
-        layout = preset
+        var value = preset
+        value.style = layout.style     // 只换按键，不改变当前的界面风格
+        layout = value
         save()
     }
 
@@ -334,6 +385,11 @@ final class PadLayoutStore: ObservableObject {
 
     func setShowTitles(_ value: Bool) {
         layout.showTitles = value
+        save()
+    }
+
+    func setStyle(_ value: PadStyle) {
+        layout.style = value
         save()
     }
 
